@@ -250,56 +250,58 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
     #' @param distance_matrix \[no default\] An all-vs-all, full numeric distance matrix, with rownames and colnames giving the region of origin of the corresponding individual.
     #' @param region_table \[no default\] A data.table describing the longitudes/latitudes of each region, with columns named "region" (character), and "lon" and "lat" (numeric or integer). The "region" column must have names corresponding to all the row/column names of the distance matrix.
     #' @return A new ReMIXTURE object.
-    initialize = function(distance_matrix,region_table){
+ initialize = function(distance_matrix,region_table){
 
+  ce("------------------------------------------------")
+  ce("Initialising ReMixture object ...")
+  ce("------------------------------------------------\n")
 
-      ce("------------------------------------------------")
-      ce("Initialising ReMixture object ...")
-      ce("------------------------------------------------\n")
+  # Repair recoverable diagonal values before validation.
+  # The validator expects self-distances to be exactly zero.
+  # If the diagonal contains NA or Inf, those cases can be fixed,
+  # so the repair should happen before validate_m().
+  ce("\tModifying distance matrix if necessary ... ")
 
+  if (all(is.na(diag(distance_matrix)))){
+    ce("Diagonals of distance matrix all `NA` --- these will be replaced by zeroes.")
+    diag(distance_matrix) <- 0
+  } else if (all(is.infinite(diag(distance_matrix)))){
+    ce("Diagonals of distance matrix are all +/- Inf --- these will be replaced by zeroes. Be sure to assure the matrix has larger values for more distant pairs.")
+    diag(distance_matrix) <- 0
+  }
 
-      ce("\tValidating input distance matrix ...")
-      private$validate_m(distance_matrix)
+  ce("\tValidating input distance matrix ...")
+  private$validate_m(distance_matrix)
 
-      ce("\tValidating input region table ...")
-      private$validate_rt(region_table)
+  ce("\tValidating input region table ...")
+  private$validate_rt(region_table)
 
-      ce("\tChecking distance matrix and region table compatibility ...")
-      private$validate_dm_rt(distance_matrix,region_table)
+  ce("\tChecking distance matrix and region table compatibility ...")
+  private$validate_dm_rt(distance_matrix,region_table)
 
-      ce("\tModifying distance matrix if necessary ... ")
+  if(any(distance_matrix>1)){
+    ce("Distance matrix has values > 1, and will now have all entries linearly scaled to fit the range [0,1]. If this is an issue, please provide a pre-scaled distance matrix.")
+    distance_matrix <- distance_matrix %>% scale_between(0,1)
+    stopifnot(all(distance_matrix[diag(distance_matrix)]==0))
+  }
 
-      if (all(is.na(diag(distance_matrix)))){
-        ce("Diagonals of distance matrix all `NA` --- these will be replaced by zeroes.")
-        diag(distance_matrix) <- 0
-      } else if (all(is.infinite(diag(distance_matrix)))){
-        ce("Diagonals of distance matrix are all +/- Inf --- these will be replaced by zeroes. Be sure to assure the matrix has larger values for more distant pairs.")
-        diag(distance_matrix) <- 0
-      }
-      if(any(distance_matrix>1)){
-        ce("Distance matrix has values > 1, and will now have all entries linearly scaled to fit the range [0,1]. If this is an issue, please provide a pre-scaled distance matrix.")
-        distance_matrix <- distance_matrix %>% scale_between(0,1)
-        stopifnot(all(distance_matrix[diag(distance_matrix)]==0))
-      }
+  ce("\tTrimming region table if necessary ... ")
+  region_table <- region_table[region %in% colnames(distance_matrix)]
 
-      ce("\tTrimming region table if necessary ... ")
-      region_table <- region_table[region %in% colnames(distance_matrix)]
+  ce("\tSaving input to object ...")
+  private$m <- distance_matrix
+  diag(private$m) <- Inf
+  private$rt <- region_table
 
-      ce("\tSaving input to object ...")
-      private$m <- distance_matrix
-      diag(private$m) <- Inf
-      private$rt <- region_table
+  ce("\tAdding sample counts to internal region table ...")
+  if(!is.null(private$rt$N)){ warning("Column named 'N' discovered in region table. This will be overwritten. To preserve it, please rename it and initialise again.") }
+  tmp <- as.data.table(table(colnames(private$m))) %>% setnames(c("V1"),c("region"))
+  private$rt <- tmp[private$rt,on=.(region)]
 
-      ce("\tAdding sample counts to internal region table ...")
-      if(!is.null(private$rt$N)){ warning("Column named 'N' discovered in region table. This will be overwritten. To preserve it, please rename it and initialise again.") }
-      tmp <- as.data.table(table(colnames(private$m))) %>% setnames(c("V1"),c("region"))
-      private$rt <- tmp[private$rt,on=.(region)]
-
-      ce("\n------------------------------------------------")
-      ce("Initialisation complete.")
-      ce("------------------------------------------------")
-    },
-
+  ce("\n------------------------------------------------")
+  ce("Initialisation complete.")
+  ce("------------------------------------------------")
+},
     #### RUN ####
     #' @description
     #' Run the ReMIXTURE algorithm and save the results in the object. Multiple runs can be requested to aid parameter selection (see description for `H`), which is strongly recommended.

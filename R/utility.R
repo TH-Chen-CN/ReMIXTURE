@@ -118,6 +118,11 @@ parseColChain <- function(colChain,setAlpha=NULL){
 
   # Set alpha as requested
   if(argGiven(setAlpha)){
+    # Reject non-finite alpha values explicitly so plotting failures are
+    # reported at the color-conversion boundary with a clear message.
+    if(any(!is.finite(setAlpha))){
+      stop("'setAlpha' values must be finite.")
+    }
     if(!all(setAlpha %between% 0:1)){ stop("'setAlpha' values should be scaled between 0 and 1") }
     chain[4,] <- if( length(setAlpha)==1 | length(setAlpha)==length(colChain) ){
       setAlpha

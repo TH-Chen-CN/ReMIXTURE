@@ -198,6 +198,798 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
       if(! all(colnames(in_dm) %in% in_rt$region)){
         stop("All regions described in the column / row names of the input distance matrix must correspond to entries in the region information table.")
       }
+    },
+
+    # These helpers provide a conservative conversion path from variant
+    # files to the full distance matrix expected by ReMIXTURE. They only
+    # keep genotype calls that can be represented as diploid biallelic
+    # dosages (0/1/2), which makes the resulting distance scale stable.
+    validate_variant_sample_table = function(sample_table, sample_col, region_col){
+      if(!(data.table::is.data.table(sample_table) || is.data.frame(sample_table))){
+        stop("`sample_table` must be a data.frame or data.table.")
+      }
+      if(!is.character(sample_col) || length(sample_col) != 1L || is.na(sample_col)){
+        stop("`sample_col` must be a single character string.")
+      }
+      if(!is.character(region_col) || length(region_col) != 1L || is.na(region_col)){
+        stop("`region_col` must be a single character string.")
+      }
+
+      sample_table <- as.data.table(sample_table)
+
+      if(!all(c(sample_col, region_col) %in% colnames(sample_table))){
+        stop("`sample_table` must contain the columns named by `sample_col` and `region_col`.")
+      }
+
+      sample_table <- sample_table[
+        ,
+        .(
+          sample = as.character(get(sample_col)),
+          region = as.character(get(region_col))
+        )
+      ]
+
+      if(nrow(sample_table) < 2L){
+        stop("`sample_table` must contain at least two samples.")
+      }
+      if(any(is.na(sample_table$sample) | sample_table$sample == "")){
+        stop("`sample_table` contains missing or empty sample names.")
+      }
+      if(any(is.na(sample_table$region) | sample_table$region == "")){
+        stop("`sample_table` contains missing or empty region assignments.")
+      }
+      if(anyDuplicated(sample_table$sample)){
+        stop("`sample_table` contains duplicated sample names.")
+      }
+
+      sample_table[]
+    },
+
+    # Cache entries store both the computed distance matrix and a minimal
+    # metadata fingerprint so repeated exploratory runs can skip the
+    # streamed VCF/BCF scan when the input file and sample mapping match.
+    validate_variant_cache_params = function(cache_file, rebuild_cache){
+      if(!is.null(cache_file)){
+        if(!is.character(cache_file) || length(cache_file) != 1L || is.na(cache_file) || cache_file == ""){
+          stop("`cache_file` must be NULL or a length-1 character path.")
+        }
+      }
+      if(!is.logical(rebuild_cache) || length(rebuild_cache) != 1L || is.na(rebuild_cache)){
+        stop("`rebuild_cache` must be a single TRUE/FALSE value.")
+      }
+
+      list(
+        cache_file = cache_file,
+        rebuild_cache = rebuild_cache
+      )
+    },
+
+    # The cache key is intentionally based on user-visible inputs only,
+    # so callers can reason about when a saved matrix is still valid.
+    build_variant_cache_metadata = function(
+      vcf_file,
+      sample_table,
+      min_variant_call_rate,
+      min_pairwise_overlap
+    ){
+      file_info <- file.info(vcf_file)
+      list(
+        vcf_file = normalizePath(vcf_file, winslash = "/", mustWork = FALSE),
+        vcf_size = unname(file_info$size),
+        vcf_mtime = as.character(file_info$mtime),
+        sample = sample_table$sample,
+        region = sample_table$region,
+        min_variant_call_rate = min_variant_call_rate,
+        min_pairwise_overlap = as.integer(min_pairwise_overlap)
+      )
+    },
+
+    # Cache validation is strict so old matrices are not silently reused
+    # against a different VCF, modified file, or changed sample mapping.
+    cache_metadata_matches = function(expected_metadata, observed_metadata){
+      if(is.null(observed_metadata)){
+        return(FALSE)
+      }
+
+      identical(expected_metadata$vcf_file, observed_metadata$vcf_file) &&
+        identical(expected_metadata$vcf_size, observed_metadata$vcf_size) &&
+        identical(expected_metadata$vcf_mtime, observed_metadata$vcf_mtime) &&
+        identical(expected_metadata$sample, observed_metadata$sample) &&
+        identical(expected_metadata$region, observed_metadata$region) &&
+        identical(expected_metadata$min_variant_call_rate, observed_metadata$min_variant_call_rate) &&
+        identical(expected_metadata$min_pairwise_overlap, observed_metadata$min_pairwise_overlap)
+    },
+
+    # Cached matrices are loaded only when both the payload shape and the
+    # stored metadata match the current request, otherwise the stream path
+    # is used and the cache can be refreshed.
+    maybe_load_cached_distance_matrix = function(cache_file, expected_metadata){
+      if(is.null(cache_file) || !file.exists(cache_file)){
+        return(NULL)
+      }
+
+      cache_payload <- tryCatch(readRDS(cache_file), error = function(e) NULL)
+      if(is.null(cache_payload) || !is.list(cache_payload) || is.null(cache_payload$distance_matrix)){
+        ce("\tCache file exists but could not be read as a ReMIXTURE distance cache; recomputing.")
+        return(NULL)
+      }
+
+      if(!private$cache_metadata_matches(expected_metadata, cache_payload$metadata)){
+        ce("\tCache metadata does not match the current request; recomputing distance matrix.")
+        return(NULL)
+      }
+
+      distance_matrix <- cache_payload$distance_matrix
+      if(!is.matrix(distance_matrix)){
+        ce("\tCache payload did not contain a valid matrix; recomputing.")
+        return(NULL)
+      }
+
+      ce("\tLoading distance matrix from cache ...")
+      distance_matrix
+    },
+
+    # Saving the cache is best-effort only; a write failure should not
+    # invalidate an otherwise successful streamed distance computation.
+    maybe_save_cached_distance_matrix = function(cache_file, distance_matrix, metadata){
+      if(is.null(cache_file)){
+        return(invisible(NULL))
+      }
+
+      cache_dir <- dirname(cache_file)
+      if(!dir.exists(cache_dir)){
+        dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
+      }
+
+      cache_payload <- list(
+        distance_matrix = distance_matrix,
+        metadata = metadata,
+        created_at = as.character(Sys.time())
+      )
+
+      save_ok <- tryCatch(
+        {
+          saveRDS(cache_payload, cache_file)
+          TRUE
+        },
+        error = function(e){
+          ce("\tFailed to save distance matrix cache: ", conditionMessage(e))
+          FALSE
+        }
+      )
+
+      if(save_ok){
+        ce("\tSaved distance matrix cache to: ", cache_file)
+      }
+      invisible(NULL)
+    },
+
+    # Whole-genome inputs cannot be loaded into memory as one huge GT
+    # matrix, so the streaming path reads VCF records in fixed record
+    # chunks and BCF records in indexed genomic tiles, then accumulates
+    # pairwise distance numerators and denominators incrementally.
+    validate_variant_stream_params = function(chunk_variants, chunk_bp){
+      if(!is.numeric(chunk_variants) || length(chunk_variants) != 1L || is.na(chunk_variants)){
+        stop("`chunk_variants` must be a single numeric value.")
+      }
+      if(!is.numeric(chunk_bp) || length(chunk_bp) != 1L || is.na(chunk_bp)){
+        stop("`chunk_bp` must be a single numeric value.")
+      }
+      if(chunk_variants < 1){
+        stop("`chunk_variants` must be at least 1.")
+      }
+      if(chunk_bp < 1){
+        stop("`chunk_bp` must be at least 1.")
+      }
+
+      list(
+        chunk_variants = as.integer(chunk_variants),
+        chunk_bp = as.integer(chunk_bp)
+      )
+    },
+
+    # Dispatch between streamed VCF and BCF readers based on the file
+    # extension so the rest of the implementation can share one public API.
+    detect_variant_file_type = function(vcf_file){
+      file_lower <- tolower(vcf_file)
+      if(grepl("\\.bcf(\\.gz)?$", file_lower)){
+        return("bcf")
+      }
+      if(grepl("\\.vcf(\\.gz|\\.bgz)?$", file_lower)){
+        return("vcf")
+      }
+      "vcf"
+    },
+
+    # Header tables differ between VCF and BCF readers, so this helper
+    # extracts identifier fields defensively from row names or common ID
+    # column names without assuming one exact in-memory representation.
+    extract_header_ids = function(header_table){
+      if(is.null(header_table)){
+        return(character())
+      }
+
+      ids <- rownames(header_table)
+      if(is.null(ids) || length(ids) == 0L || all(is.na(ids) | ids == "")){
+        header_df <- tryCatch(as.data.frame(header_table), error = function(e) NULL)
+        if(is.null(header_df)){
+          return(character())
+        }
+        id_col <- grep("^id$", names(header_df), ignore.case = TRUE, value = TRUE)[1]
+        if(length(id_col) == 1L && !is.na(id_col)){
+          ids <- as.character(header_df[[id_col]])
+        } else {
+          ids <- character()
+        }
+      }
+
+      ids <- unique(ids[!is.na(ids) & ids != ""])
+      ids
+    },
+
+    # Normalise GT chunks into a matrix with columns ordered exactly like
+    # `sample_table`, regardless of whether the low-level reader returns a
+    # matrix, vector, or nested list representation.
+    normalise_variant_gt_chunk = function(gt_chunk, sample_names){
+      empty_matrix <- matrix(
+        character(),
+        nrow = 0L,
+        ncol = length(sample_names),
+        dimnames = list(character(), sample_names)
+      )
+
+      if(is.null(gt_chunk)){
+        return(empty_matrix)
+      }
+
+      if(is.list(gt_chunk) && !is.matrix(gt_chunk) && !is.array(gt_chunk)){
+        gt_chunk <- tryCatch(as.matrix(gt_chunk), error = function(e) NULL)
+        if(is.null(gt_chunk)){
+          return(empty_matrix)
+        }
+      }
+
+      if(is.null(dim(gt_chunk))){
+        if(length(gt_chunk) == 0L){
+          return(empty_matrix)
+        }
+        gt_chunk <- matrix(
+          gt_chunk,
+          ncol = length(sample_names),
+          byrow = FALSE
+        )
+      } else {
+        gt_chunk <- as.matrix(gt_chunk)
+      }
+
+      if(nrow(gt_chunk) == 0L){
+        return(empty_matrix)
+      }
+
+      if(is.null(colnames(gt_chunk))){
+        if(ncol(gt_chunk) != length(sample_names)){
+          stop("A genotype chunk did not contain the expected number of samples.")
+        }
+        colnames(gt_chunk) <- sample_names
+      }
+
+      if(!all(sample_names %in% colnames(gt_chunk))){
+        stop("A genotype chunk is missing one or more requested samples.")
+      }
+
+      gt_chunk[, sample_names, drop = FALSE]
+    },
+
+    # Convert GT strings into dosages where 0/0 -> 0, 0/1 or 1/0 -> 1,
+    # and 1/1 -> 2. Any genotype outside this restricted diploid
+    # biallelic representation is treated as missing for distance output.
+    gt_to_dosage_matrix = function(gt_matrix, min_variant_call_rate, allow_empty = FALSE){
+      if(!is.numeric(min_variant_call_rate) || length(min_variant_call_rate) != 1L || is.na(min_variant_call_rate)){
+        stop("`min_variant_call_rate` must be a single numeric value.")
+      }
+      if(min_variant_call_rate < 0 || min_variant_call_rate > 1){
+        stop("`min_variant_call_rate` must fall between 0 and 1.")
+      }
+
+      gt_values <- as.character(gt_matrix)
+      gt_values <- gsub("\\|", "/", gt_values)
+
+      dosage_values <- rep(NA_real_, length(gt_values))
+      dosage_values[gt_values == "0/0"] <- 0
+      dosage_values[gt_values %in% c("0/1", "1/0")] <- 1
+      dosage_values[gt_values == "1/1"] <- 2
+
+      dosage_matrix <- matrix(
+        dosage_values,
+        nrow = nrow(gt_matrix),
+        ncol = ncol(gt_matrix),
+        dimnames = dimnames(gt_matrix)
+      )
+
+      keep_variants <- rowMeans(!is.na(dosage_matrix)) >= min_variant_call_rate
+      if(!any(keep_variants)){
+        if(isTRUE(allow_empty)){
+          return(dosage_matrix[FALSE, , drop = FALSE])
+        }
+        stop("No variants remained after applying `min_variant_call_rate`.")
+      }
+
+      dosage_matrix[keep_variants, , drop = FALSE]
+    },
+
+    # The streamed distance path keeps running totals of pairwise dosage
+    # differences and overlapping non-missing sites, then converts those
+    # totals to a final mean distance matrix only once at the end.
+    initialise_distance_accumulator = function(sample_names){
+      list(
+        sum_diff = matrix(
+          0.0,
+          nrow = length(sample_names),
+          ncol = length(sample_names),
+          dimnames = list(sample_names, sample_names)
+        ),
+        pairwise_overlap = matrix(
+          0L,
+          nrow = length(sample_names),
+          ncol = length(sample_names),
+          dimnames = list(sample_names, sample_names)
+        ),
+        processed_chunks = 0L,
+        processed_variants = 0L,
+        retained_variants = 0L
+      )
+    },
+
+    # Each chunk contributes additive numerators and denominators for all
+    # sample pairs, which keeps memory use bounded by the number of
+    # samples rather than the number of variants in the input file.
+    accumulate_dosage_chunk = function(dosage_matrix, accumulator){
+      if(nrow(dosage_matrix) == 0L){
+        return(accumulator)
+      }
+
+      nsamples <- ncol(dosage_matrix)
+      non_missing <- !is.na(dosage_matrix)
+
+      accumulator$processed_chunks <- accumulator$processed_chunks + 1L
+      accumulator$retained_variants <- accumulator$retained_variants + nrow(dosage_matrix)
+
+      for(i in seq_len(nsamples)){
+        sample_i <- dosage_matrix[, i]
+        keep_i <- non_missing[, i]
+        for(j in i:nsamples){
+          keep <- keep_i & non_missing[, j]
+          nkeep <- sum(keep)
+
+          accumulator$pairwise_overlap[i, j] <- accumulator$pairwise_overlap[i, j] + nkeep
+          accumulator$pairwise_overlap[j, i] <- accumulator$pairwise_overlap[i, j]
+
+          if(i == j || nkeep == 0L){
+            next
+          }
+
+          delta <- sum(abs(sample_i[keep] - dosage_matrix[keep, j]) / 2)
+          accumulator$sum_diff[i, j] <- accumulator$sum_diff[i, j] + delta
+          accumulator$sum_diff[j, i] <- accumulator$sum_diff[i, j]
+        }
+      }
+
+      accumulator
+    },
+
+    # Final distance values are computed after all chunks have been
+    # processed so that overlap validation is based on the whole file
+    # rather than any one local genomic window.
+    finalize_distance_accumulator = function(accumulator, sample_regions, min_pairwise_overlap){
+      if(!is.numeric(min_pairwise_overlap) || length(min_pairwise_overlap) != 1L || is.na(min_pairwise_overlap)){
+        stop("`min_pairwise_overlap` must be a single numeric value.")
+      }
+      if(min_pairwise_overlap < 1){
+        stop("`min_pairwise_overlap` must be at least 1.")
+      }
+
+      if(accumulator$retained_variants < 1L){
+        stop("No variants remained after applying `min_variant_call_rate` across all chunks.")
+      }
+
+      pairwise_overlap <- accumulator$pairwise_overlap
+      distance_matrix <- accumulator$sum_diff / pairwise_overlap
+      distance_matrix[!is.finite(distance_matrix)] <- NA_real_
+      diag(distance_matrix) <- 0.0
+
+      low_overlap_pairs <- which(
+        pairwise_overlap < min_pairwise_overlap & upper.tri(pairwise_overlap),
+        arr.ind = TRUE
+      )
+      if(nrow(low_overlap_pairs) > 0L){
+        example_pairs <- apply(
+          low_overlap_pairs[seq_len(min(5L, nrow(low_overlap_pairs))), , drop = FALSE],
+          1,
+          function(idx){
+            paste0(
+              rownames(pairwise_overlap)[idx[1]],
+              " vs ",
+              colnames(pairwise_overlap)[idx[2]],
+              " (",
+              pairwise_overlap[idx[1], idx[2]],
+              " shared variants)"
+            )
+          }
+        )
+        stop(
+          "Some sample pairs share fewer than `min_pairwise_overlap` informative variants after filtering. Examples: ",
+          paste(example_pairs, collapse = "; ")
+        )
+      }
+
+      if(anyNA(distance_matrix[upper.tri(distance_matrix)])){
+        stop("At least one sample pair had no overlapping non-missing diploid biallelic variants.")
+      }
+
+      rownames(distance_matrix) <- unname(sample_regions)
+      colnames(distance_matrix) <- unname(sample_regions)
+
+      distance_matrix
+    },
+
+    # BCF chunking uses genomic windows, so contig metadata has to be
+    # normalised from the scanBcfHeader representation before iterating.
+    extract_bcf_seq_table = function(header_entry){
+      header_tables <- header_entry$Header
+      if(is.null(header_tables)){
+        header_tables <- header_entry$header
+      }
+
+      ref_names <- as.character(header_entry$Reference)
+      ref_names <- ref_names[!is.na(ref_names) & ref_names != ""]
+
+      contig_df <- NULL
+      if(!is.null(header_tables)){
+        table_names <- names(header_tables)
+        contig_idx <- match(TRUE, tolower(table_names) == "contig", nomatch = 0L)
+        if(contig_idx > 0L){
+          contig_df <- tryCatch(as.data.frame(header_tables[[contig_idx]]), error = function(e) NULL)
+        }
+      }
+
+      if(is.null(contig_df) || nrow(contig_df) == 0L){
+        return(data.table(seqname = ref_names, seqlength = NA_integer_))
+      }
+
+      seqname <- rownames(contig_df)
+      if(is.null(seqname) || length(seqname) == 0L || all(is.na(seqname) | seqname == "")){
+        id_col <- grep("^id$|seqname|chrom", names(contig_df), ignore.case = TRUE, value = TRUE)[1]
+        if(length(id_col) == 1L && !is.na(id_col)){
+          seqname <- as.character(contig_df[[id_col]])
+        } else {
+          seqname <- ref_names[seq_len(nrow(contig_df))]
+        }
+      }
+
+      length_col <- grep("length|seqlength|size", names(contig_df), ignore.case = TRUE, value = TRUE)[1]
+      seqlength <- rep(NA_integer_, length(seqname))
+      if(length(length_col) == 1L && !is.na(length_col)){
+        seqlength <- suppressWarnings(as.integer(contig_df[[length_col]]))
+      }
+
+      seq_table <- data.table(seqname = as.character(seqname), seqlength = seqlength)
+      missing_ref <- setdiff(ref_names, seq_table$seqname)
+      if(length(missing_ref) > 0L){
+        seq_table <- rbind(
+          seq_table,
+          data.table(seqname = missing_ref, seqlength = NA_integer_)
+        )
+      }
+
+      unique(seq_table[!is.na(seqname) & seqname != ""])
+    },
+
+    # Genomic tiles are generated per contig so BCF scans stay bounded in
+    # memory even for whole-genome files with tens of millions of records.
+    build_bcf_chunk_ranges = function(seq_table, chunk_bp){
+      range_list <- lapply(seq_len(nrow(seq_table)), function(i){
+        seqname <- seq_table$seqname[i]
+        seqlength <- seq_table$seqlength[i]
+
+        if(is.na(seqlength) || seqlength < 1L){
+          return(data.table(
+            seqname = seqname,
+            start = 1L,
+            end = as.integer(.Machine$integer.max %/% 2L)
+          ))
+        }
+
+        starts <- seq.int(1L, seqlength, by = chunk_bp)
+        ends <- pmin(starts + chunk_bp - 1L, seqlength)
+        data.table(seqname = seqname, start = starts, end = ends)
+      })
+
+      rbindlist(range_list)
+    },
+
+    # Stream VCF chunks by record count using VcfFile/yieldSize so whole
+    # chromosomes or whole genomes can be processed without materialising
+    # the complete GT matrix in memory.
+    stream_vcf_distance_matrix = function(
+      vcf_file,
+      sample_table,
+      min_variant_call_rate,
+      min_pairwise_overlap,
+      chunk_variants
+    ){
+      if(!requireNamespace("VariantAnnotation", quietly = TRUE)){
+        stop("Reading VCF input requires the 'VariantAnnotation' package. Install it from Bioconductor and try again.")
+      }
+
+      sample_names <- sample_table$sample
+      hdr <- VariantAnnotation::scanVcfHeader(vcf_file)
+      hdr_geno_fields <- private$extract_header_ids(VariantAnnotation::geno(hdr))
+      if(!"GT" %in% hdr_geno_fields){
+        stop("The supplied VCF file does not define a GT format field.")
+      }
+
+      hdr_samples <- VariantAnnotation::samples(hdr)
+      missing_samples <- setdiff(sample_names, hdr_samples)
+      if(length(missing_samples) > 0L){
+        stop(
+          "The following samples were requested in `sample_table` but were not found in the VCF header: ",
+          paste(utils::head(missing_samples, 10L), collapse = ", "),
+          if(length(missing_samples) > 10L) ", ..." else ""
+        )
+      }
+
+      vcf_handle <- VariantAnnotation::VcfFile(vcf_file, yieldSize = chunk_variants)
+      open(vcf_handle)
+      on.exit(close(vcf_handle), add = TRUE)
+
+      param <- VariantAnnotation::ScanVcfParam(
+        geno = "GT",
+        samples = sample_names
+      )
+      accumulator <- private$initialise_distance_accumulator(sample_names)
+
+      repeat{
+        gt_chunk <- VariantAnnotation::readGT(
+          vcf_handle,
+          param = param,
+          row.names = TRUE
+        )
+        gt_chunk <- private$normalise_variant_gt_chunk(gt_chunk, sample_names)
+        if(nrow(gt_chunk) == 0L){
+          break
+        }
+
+        accumulator$processed_variants <- accumulator$processed_variants + nrow(gt_chunk)
+        dosage_chunk <- private$gt_to_dosage_matrix(
+          gt_matrix = gt_chunk,
+          min_variant_call_rate = min_variant_call_rate,
+          allow_empty = TRUE
+        )
+        accumulator <- private$accumulate_dosage_chunk(dosage_chunk, accumulator)
+
+        if(accumulator$processed_chunks %% 10L == 0L){
+          ce(
+            "\t\tProcessed ", accumulator$processed_chunks, " VCF chunk(s); retained ",
+            accumulator$retained_variants, " variants so far."
+          )
+        }
+      }
+
+      ce(
+        "\t\tFinished streaming VCF input: ", accumulator$processed_variants,
+        " variants read, ", accumulator$retained_variants, " retained."
+      )
+
+      private$finalize_distance_accumulator(
+        accumulator = accumulator,
+        sample_regions = stats::setNames(sample_table$region, sample_table$sample),
+        min_pairwise_overlap = min_pairwise_overlap
+      )
+    },
+
+    # Stream indexed BCF files across genomic tiles so large binary
+    # inputs can be processed in bounded memory in the same way as VCF.
+    stream_bcf_distance_matrix = function(
+      vcf_file,
+      sample_table,
+      min_variant_call_rate,
+      min_pairwise_overlap,
+      chunk_bp
+    ){
+      if(!requireNamespace("Rsamtools", quietly = TRUE)){
+        stop("Reading BCF input requires the 'Rsamtools' package. Install it from Bioconductor and try again.")
+      }
+
+      index_candidates <- unique(c(
+        paste0(vcf_file, ".csi"),
+        paste0(vcf_file, ".bci"),
+        sub("\\.bcf$", ".csi", vcf_file, ignore.case = TRUE),
+        sub("\\.bcf$", ".bci", vcf_file, ignore.case = TRUE)
+      ))
+      if(!any(file.exists(index_candidates))){
+        stop("Chunked BCF reading requires an index file (.csi or .bci) alongside `vcf_file`.")
+      }
+
+      sample_names <- sample_table$sample
+      header_list <- Rsamtools::scanBcfHeader(vcf_file)
+      header_entry <- if(is.list(header_list) && length(header_list) > 0L) header_list[[1L]] else header_list
+
+      header_tables <- header_entry$Header
+      if(is.null(header_tables)){
+        header_tables <- header_entry$header
+      }
+      format_fields <- character()
+      if(!is.null(header_tables)){
+        table_names <- names(header_tables)
+        format_idx <- match(TRUE, tolower(table_names) == "format", nomatch = 0L)
+        if(format_idx > 0L){
+          format_fields <- private$extract_header_ids(header_tables[[format_idx]])
+        }
+      }
+      if(length(format_fields) > 0L && !"GT" %in% format_fields){
+        stop("The supplied BCF file does not define a GT format field.")
+      }
+
+      hdr_samples <- as.character(header_entry$Sample)
+      missing_samples <- setdiff(sample_names, hdr_samples)
+      if(length(missing_samples) > 0L){
+        stop(
+          "The following samples were requested in `sample_table` but were not found in the BCF header: ",
+          paste(utils::head(missing_samples, 10L), collapse = ", "),
+          if(length(missing_samples) > 10L) ", ..." else ""
+        )
+      }
+
+      seq_table <- private$extract_bcf_seq_table(header_entry)
+      if(nrow(seq_table) < 1L){
+        stop("Could not derive contig information from the BCF header, so chunked reading cannot proceed.")
+      }
+      chunk_ranges <- private$build_bcf_chunk_ranges(seq_table, chunk_bp)
+
+      bcf_handle <- Rsamtools::BcfFile(vcf_file)
+      open(bcf_handle)
+      on.exit(close(bcf_handle), add = TRUE)
+
+      accumulator <- private$initialise_distance_accumulator(sample_names)
+
+      for(i in seq_len(nrow(chunk_ranges))){
+        chunk_range <- GenomicRanges::GRanges(
+          seqnames = chunk_ranges$seqname[i],
+          ranges = IRanges::IRanges(
+            start = chunk_ranges$start[i],
+            end = chunk_ranges$end[i]
+          )
+        )
+
+        bcf_chunk <- Rsamtools::scanBcf(
+          bcf_handle,
+          param = Rsamtools::ScanBcfParam(
+            geno = "GT",
+            samples = sample_names,
+            which = chunk_range
+          )
+        )[[1L]]
+
+        gt_chunk <- NULL
+        if(!is.null(bcf_chunk[["GENO"]])){
+          gt_chunk <- bcf_chunk[["GENO"]][["GT"]]
+        }
+        gt_chunk <- private$normalise_variant_gt_chunk(gt_chunk, sample_names)
+        if(nrow(gt_chunk) == 0L){
+          next
+        }
+
+        accumulator$processed_variants <- accumulator$processed_variants + nrow(gt_chunk)
+        dosage_chunk <- private$gt_to_dosage_matrix(
+          gt_matrix = gt_chunk,
+          min_variant_call_rate = min_variant_call_rate,
+          allow_empty = TRUE
+        )
+        accumulator <- private$accumulate_dosage_chunk(dosage_chunk, accumulator)
+
+        if(i %% 10L == 0L){
+          ce(
+            "\t\tProcessed ", i, " / ", nrow(chunk_ranges), " BCF chunk(s); retained ",
+            accumulator$retained_variants, " variants so far."
+          )
+        }
+      }
+
+      ce(
+        "\t\tFinished streaming BCF input: ", accumulator$processed_variants,
+        " variants read, ", accumulator$retained_variants, " retained."
+      )
+
+      private$finalize_distance_accumulator(
+        accumulator = accumulator,
+        sample_regions = stats::setNames(sample_table$region, sample_table$sample),
+        min_pairwise_overlap = min_pairwise_overlap
+      )
+    },
+
+    # This orchestration helper keeps one public API while routing large
+    # inputs through chunked readers that are appropriate for each file
+    # format and then reuses the same distance-matrix validation path.
+    distance_matrix_from_vcf_inputs = function(
+      vcf_file,
+      sample_table,
+      sample_col,
+      region_col,
+      min_variant_call_rate,
+      min_pairwise_overlap,
+      chunk_variants,
+      chunk_bp,
+      cache_file,
+      rebuild_cache
+    ){
+      if(!is.character(vcf_file) || length(vcf_file) != 1L || is.na(vcf_file) || vcf_file == ""){
+        stop("`vcf_file` must be a length-1 character path.")
+      }
+      if(!file.exists(vcf_file)){
+        stop("`vcf_file` does not exist: ", vcf_file)
+      }
+
+      chunking <- private$validate_variant_stream_params(
+        chunk_variants = chunk_variants,
+        chunk_bp = chunk_bp
+      )
+      cacheing <- private$validate_variant_cache_params(
+        cache_file = cache_file,
+        rebuild_cache = rebuild_cache
+      )
+
+      ce("\tValidating VCF/BCF sample table ...")
+      sample_table <- private$validate_variant_sample_table(
+        sample_table = sample_table,
+        sample_col = sample_col,
+        region_col = region_col
+      )
+      cache_metadata <- private$build_variant_cache_metadata(
+        vcf_file = vcf_file,
+        sample_table = sample_table,
+        min_variant_call_rate = min_variant_call_rate,
+        min_pairwise_overlap = min_pairwise_overlap
+      )
+      if(!isTRUE(cacheing$rebuild_cache)){
+        cached_distance_matrix <- private$maybe_load_cached_distance_matrix(
+          cache_file = cacheing$cache_file,
+          expected_metadata = cache_metadata
+        )
+        if(!is.null(cached_distance_matrix)){
+          return(cached_distance_matrix)
+        }
+      } else if(!is.null(cacheing$cache_file)){
+        ce("\tRebuilding distance matrix cache as requested ...")
+      }
+
+      file_type <- private$detect_variant_file_type(vcf_file)
+      ce("\tStreaming genotype calls from ", toupper(file_type), " input ...")
+
+      distance_matrix <- if(file_type == "bcf"){
+        private$stream_bcf_distance_matrix(
+          vcf_file = vcf_file,
+          sample_table = sample_table,
+          min_variant_call_rate = min_variant_call_rate,
+          min_pairwise_overlap = min_pairwise_overlap,
+          chunk_bp = chunking$chunk_bp
+        )
+      } else {
+        private$stream_vcf_distance_matrix(
+          vcf_file = vcf_file,
+          sample_table = sample_table,
+          min_variant_call_rate = min_variant_call_rate,
+          min_pairwise_overlap = min_pairwise_overlap,
+          chunk_variants = chunking$chunk_variants
+        )
+      }
+
+      private$maybe_save_cached_distance_matrix(
+        cache_file = cacheing$cache_file,
+        distance_matrix = distance_matrix,
+        metadata = cache_metadata
+      )
+
+      distance_matrix
     }
   ),
 
@@ -247,14 +1039,65 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
 
     #' @description
     #' Create a new ReMIXTURE object.
-    #' @param distance_matrix \[no default\] An all-vs-all, full numeric distance matrix, with rownames and colnames giving the region of origin of the corresponding individual.
+    #' @param distance_matrix \[NULL\] An all-vs-all, full numeric distance matrix, with rownames and colnames giving the region of origin of the corresponding individual.
     #' @param region_table \[no default\] A data.table describing the longitudes/latitudes of each region, with columns named "region" (character), and "lon" and "lat" (numeric or integer). The "region" column must have names corresponding to all the row/column names of the distance matrix.
+    #' @param vcf_file \[NULL\] Path to a VCF or BCF file with genotype calls in the `GT` format field. Provide this instead of `distance_matrix` to build the matrix during initialization.
+    #' @param sample_table \[NULL\] A data.frame or data.table mapping VCF/BCF sample IDs to regions. It must contain the columns named by `sample_col` and `region_col`.
+    #' @param sample_col \["sample"\] Column of `sample_table` containing sample IDs that match the VCF/BCF header.
+    #' @param region_col \["region"\] Column of `sample_table` containing region assignments for each sample.
+    #' @param min_variant_call_rate \[0.9\] Minimum non-missing call rate required for a variant to contribute to the distance matrix when reading from a VCF/BCF file.
+    #' @param min_pairwise_overlap \[100\] Minimum number of retained variants that every pair of samples must share after filtering when reading from a VCF/BCF file.
+    #' @param chunk_variants \[10000\] Number of VCF records to read per streaming chunk when `vcf_file` points to a VCF file.
+    #' @param chunk_bp \[5000000\] Width in base pairs of each indexed BCF chunk when `vcf_file` points to a BCF file.
+    #' @param cache_file \[NULL\] Optional RDS path used to cache the computed distance matrix for repeated tests on the same VCF/BCF input and sample mapping.
+    #' @param rebuild_cache \[FALSE\] If TRUE and `cache_file` is provided, ignore any existing cache and recompute the distance matrix before overwriting the cache.
     #' @return A new ReMIXTURE object.
- initialize = function(distance_matrix,region_table){
+ initialize = function(
+   distance_matrix = NULL,
+   region_table,
+   vcf_file = NULL,
+   sample_table = NULL,
+   sample_col = "sample",
+   region_col = "region",
+   min_variant_call_rate = 0.9,
+   min_pairwise_overlap = 100L,
+   chunk_variants = 10000L,
+   chunk_bp = 5000000L,
+   cache_file = NULL,
+   rebuild_cache = FALSE
+ ){
 
   ce("------------------------------------------------")
   ce("Initialising ReMixture object ...")
   ce("------------------------------------------------\n")
+
+  # Allow object construction directly from raw variant data by building
+  # the distance matrix first and then reusing the existing validation
+  # and storage path for matrix-based initialization.
+  if(!is.null(distance_matrix) && !is.null(vcf_file)){
+    stop("Provide either `distance_matrix` or `vcf_file`, not both.")
+  }
+  if(is.null(distance_matrix) && is.null(vcf_file)){
+    stop("Provide either `distance_matrix` or `vcf_file`.")
+  }
+  if(is.null(distance_matrix)){
+    if(is.null(sample_table)){
+      stop("`sample_table` is required when `vcf_file` is used.")
+    }
+    ce("\tConstructing distance matrix from VCF/BCF input ...")
+    distance_matrix <- private$distance_matrix_from_vcf_inputs(
+      vcf_file = vcf_file,
+      sample_table = sample_table,
+      sample_col = sample_col,
+      region_col = region_col,
+      min_variant_call_rate = min_variant_call_rate,
+      min_pairwise_overlap = min_pairwise_overlap,
+      chunk_variants = chunk_variants,
+      chunk_bp = chunk_bp,
+      cache_file = cache_file,
+      rebuild_cache = rebuild_cache
+    )
+  }
 
   # Repair recoverable diagonal values before validation.
   # The validator expects self-distances to be exactly zero.
@@ -302,6 +1145,51 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
   ce("Initialisation complete.")
   ce("------------------------------------------------")
 },
+
+    #' @description
+    #' Build a pairwise distance matrix from genotype calls stored in a VCF or BCF file.
+    #'
+    #' This implementation uses only diploid biallelic `GT` calls that can be represented
+    #' as dosages 0, 1, and 2. Pairwise distances are the mean absolute dosage difference
+    #' divided by two, evaluated only across variants that are non-missing in both samples.
+    #'
+    #' @param vcf_file \[no default\] Path to a VCF or BCF file with genotype calls in the `GT` format field.
+    #' @param sample_table \[no default\] A data.frame or data.table mapping VCF/BCF sample IDs to regions.
+    #' @param sample_col \["sample"\] Column of `sample_table` containing sample IDs that match the VCF/BCF header.
+    #' @param region_col \["region"\] Column of `sample_table` containing region assignments for each sample.
+    #' @param min_variant_call_rate \[0.9\] Minimum non-missing call rate required for a variant to contribute to the distance matrix.
+    #' @param min_pairwise_overlap \[100\] Minimum number of retained variants that every pair of samples must share after filtering.
+    #' @param chunk_variants \[10000\] Number of VCF records to read per streaming chunk when `vcf_file` points to a VCF file.
+    #' @param chunk_bp \[5000000\] Width in base pairs of each indexed BCF chunk when `vcf_file` points to a BCF file.
+    #' @param cache_file \[NULL\] Optional RDS path used to cache the computed distance matrix for repeated tests on the same VCF/BCF input and sample mapping.
+    #' @param rebuild_cache \[FALSE\] If TRUE and `cache_file` is provided, ignore any existing cache and recompute the distance matrix before overwriting the cache.
+    #'
+    #' @return A full square numeric distance matrix with region labels in the row and column names.
+    distance_matrix_from_vcf = function(
+      vcf_file,
+      sample_table,
+      sample_col = "sample",
+      region_col = "region",
+      min_variant_call_rate = 0.9,
+      min_pairwise_overlap = 100L,
+      chunk_variants = 10000L,
+      chunk_bp = 5000000L,
+      cache_file = NULL,
+      rebuild_cache = FALSE
+    ){
+      private$distance_matrix_from_vcf_inputs(
+        vcf_file = vcf_file,
+        sample_table = sample_table,
+        sample_col = sample_col,
+        region_col = region_col,
+        min_variant_call_rate = min_variant_call_rate,
+        min_pairwise_overlap = min_pairwise_overlap,
+        chunk_variants = chunk_variants,
+        chunk_bp = chunk_bp,
+        cache_file = cache_file,
+        rebuild_cache = rebuild_cache
+      )
+    },
     #### RUN ####
     #' @description
     #' Run the ReMIXTURE algorithm and save the results in the object. Multiple runs can be requested to aid parameter selection (see description for `H`), which is strongly recommended.
@@ -779,7 +1667,15 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
       if(is.null(alpha_max)){
         at[,] <- 1.0
       } else {
-        at[,] <- at/max(at)*alpha_max
+        # Some runs can legitimately contain no between-region overlap.
+        # In that case the overlap matrix is all zero off-diagonal, so
+        # alpha scaling should yield invisible lines rather than NaN.
+        maxAlphaSource <- suppressWarnings(max(at, na.rm = TRUE))
+        if(!is.finite(maxAlphaSource) || maxAlphaSource <= 0){
+          at[,] <- 0.0
+        } else {
+          at[,] <- at / maxAlphaSource * alpha_max
+        }
       }
       plotMiddle <- findCentreLL(range_lon,range_lat)
       trt <- copy(rt) %>% rotateLatLonDtLL(-plotMiddle[1],-plotMiddle[2],splitPlotGrps=F)

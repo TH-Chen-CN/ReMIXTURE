@@ -118,6 +118,9 @@ parseColChain <- function(colChain,setAlpha=NULL){
 
   # Set alpha as requested
   if(argGiven(setAlpha)){
+    if(any(!is.finite(setAlpha))){
+      stop("'setAlpha' values must be finite.")
+    }
     if(!all(setAlpha %between% 0:1)){ stop("'setAlpha' values should be scaled between 0 and 1") }
     chain[4,] <- if( length(setAlpha)==1 | length(setAlpha)==length(colChain) ){
       setAlpha
@@ -126,6 +129,29 @@ parseColChain <- function(colChain,setAlpha=NULL){
     }
   }
   return(chain)
+}
+
+compute_plot_width_scaling <- function(totDiv, uniqueDiv, overlap, width_max){
+  maxDiv <- suppressWarnings(max(totDiv, na.rm = TRUE))
+
+  if(!is.finite(maxDiv) || maxDiv <= 0){
+    return(list(
+      wTotDiv = rep(0.0, length(totDiv)),
+      wUniqueDiv = rep(0.0, length(uniqueDiv)),
+      wst = matrix(
+        0.0,
+        nrow = nrow(overlap),
+        ncol = ncol(overlap),
+        dimnames = dimnames(overlap)
+      )
+    ))
+  }
+
+  list(
+    wTotDiv = totDiv/maxDiv*width_max,
+    wUniqueDiv = uniqueDiv/maxDiv*width_max,
+    wst = overlap/maxDiv*width_max
+  )
 }
 
 

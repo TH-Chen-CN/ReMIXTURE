@@ -15,13 +15,15 @@ ReMIXTURE is an R package, and to run it requires:
 1) A symmetrical numeric matrix of pairwise sample-to-sample distances (any distance metric will do in principle), whose rownames and colnames give the region to which the sample is assigned.
 2) A data.table or data.frame with column names `region`, `lon`, and `lat`, providing the position (numeric) on the globe given to each region (character).
 
+Alternatively, ReMIXTURE can construct the distance matrix directly from a `.vcf` or `.vcf.gz` file using `SNPRelate`, provided you also supply a `sample_table` with character columns named `sample` and `region`. Direct `.bcf` input is not supported by this lightweight path.
+
 # History
 
 The ReMIXTURE concept was first attempted in Tripodi & Rabanus-Wallace, et al. (2021) _Global range expansion history of pepper (*Capsicum spp.*) revealed by over 10,000 genebank accessions_. PNAS. Newer versions have very significant improvements. The algorithm currently in use is not published.
 
 # Using ReMIXTURE.
 
-Install using `devtools::install_github("https://github.com/mtrw/ReMIXTURE")`, and follow the tutorial in ?ReMIXTURE (in the examples section).
+Install using `devtools::install_github("https://github.com/mtrw/ReMIXTURE")`, and follow the tutorial in ?ReMIXTURE (in the examples section). If you want to build a distance matrix from VCF input, install `SNPRelate` from Bioconductor first.
 
 # Future
 

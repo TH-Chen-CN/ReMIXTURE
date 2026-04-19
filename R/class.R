@@ -6,7 +6,7 @@
 #' It produces intuitive (and [pretty](https://github.com/mtrw/ReMIXTURE/blob/main/README.md)!) plots.
 #' These plots are based on ReMIXTURE's diversity metric, which is designed to be maximally intuitive. They work like Venn diagrams: Diversity in a group is partitioned into diversity that is unique to that group, and that which is overlapped by the diversity in other groups.
 #'
-#' ReMIXTURE will work on any dataset giving the pairwise distances between a collection of samples (say, at least 10?) from each of some collection of regions (or groups, more broadly). It requires just a pairwise distance matrix (which can provide any metric you choose, such as IBS distances for genetic data), and a table describing where on Earth each region/group is located (latitude and longitude), which is used for plotting only.
+#' ReMIXTURE will work on any dataset giving the pairwise distances between a collection of samples (say, at least 10?) from each of some collection of regions (or groups, more broadly). It requires either a pairwise distance matrix (which can provide any metric you choose, such as IBS distances for genetic data), or a `.vcf` / `.vcf.gz` file that can be converted to an IBS distance matrix via `SNPRelate`, and a table describing where on Earth each region/group is located (latitude and longitude), which is used for plotting only.
 #'
 #' ## *GETTING STARTED?*
 #' Scroll down and follow the short tutorial in the *examples* section.
@@ -140,9 +140,10 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
 
     #### VALIDATORS ####
     validate_rt = function(in_rt){
-      if( !data.table::is.data.table(in_rt) ){
-        stop("Region position table must be a data.table")
+      if( !(data.table::is.data.table(in_rt) || is.data.frame(in_rt)) ){
+        stop("Region position table must be a data.frame or data.table")
       }
+      in_rt <- data.table::as.data.table(in_rt)
       if( any(!c("region","lon","lat") %in% colnames(in_rt) ) ){
         stop("Region position table must include columns named \"lon\", \"lat\", and \"region\".")
       }
@@ -156,15 +157,13 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
       if(!(is.character(in_rt$region))){
         stop("Column `region` must be a character vector.")
       }
-      if( !all(unique(colnames(private$dm)) %in% in_rt$region) ){
-        stop("All regions present in distance matrix must have entries in the region position table.")
-      }
       if( !all(in_rt$lon %between% c(-180,180)) ){
         stop("All lon (longitude) values must fall between +/- 180.")
       }
       if( !all(in_rt$lat %between% c(-85,85)) ){
         stop("All lat (latitude) values must fall between +/- 85.")
       }
+      in_rt
     },
 
     validate_m = function(in_dm){
@@ -174,7 +173,10 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
       if( ncol(in_dm) != nrow(in_dm) ){
         stop( paste0("Argument to distance_matrix must be a square matrix.") )
       }
-      if( !all(in_dm[diag(in_dm)]==0) ){
+      if(any(!is.finite(in_dm))){
+        stop("All distance matrix entries must be finite")
+      }
+      if( !all(diag(in_dm)==0) ){
         stop("Self-distance (i.e. distance matrix diagonals) should all be zero")
       }
       if ( !all(in_dm[upper.tri(in_dm)]==t(in_dm)[upper.tri(in_dm)]) ){
@@ -198,6 +200,196 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
       if(! all(colnames(in_dm) %in% in_rt$region)){
         stop("All regions described in the column / row names of the input distance matrix must correspond to entries in the region information table.")
       }
+    },
+
+    validate_variant_sample_table = function(in_sample_table){
+      if(is.null(in_sample_table)){
+        stop("`sample_table` must be provided when using `vcf_file`.")
+      }
+      if(!data.table::is.data.table(in_sample_table) && !is.data.frame(in_sample_table)){
+        stop("`sample_table` must be a data.frame or data.table.")
+      }
+
+      in_sample_table <- data.table::as.data.table(in_sample_table)
+
+      if(!all(c("sample", "region") %in% colnames(in_sample_table))){
+        stop("`sample_table` must contain columns named `sample` and `region`.")
+      }
+      if(!is.character(in_sample_table$sample)){
+        stop("Column `sample` in `sample_table` must be character.")
+      }
+      if(!is.character(in_sample_table$region)){
+        stop("Column `region` in `sample_table` must be character.")
+      }
+      if(any(is.na(in_sample_table$sample)) || any(in_sample_table$sample == "")){
+        stop("Column `sample` in `sample_table` must not contain missing or empty values.")
+      }
+      if(any(is.na(in_sample_table$region)) || any(in_sample_table$region == "")){
+        stop("Column `region` in `sample_table` must not contain missing or empty values.")
+      }
+      if(anyDuplicated(in_sample_table$sample)){
+        stop("`sample_table$sample` must not contain duplicates.")
+      }
+
+      in_sample_table
+    },
+
+    filter_invalid_distance_samples = function(dm){
+      invalid_message <- paste0(
+        "Fewer than 2 samples remain after filtering invalid distances. ",
+        "This often means the VCF has too much missing data. ",
+        "Consider building the distance matrix yourself, performing missing-data handling or imputation first, or using data with fewer missing values."
+      )
+
+      if(nrow(dm) < 2){
+        stop(invalid_message)
+      }
+
+      invalid <- is.na(dm) | !is.finite(dm)
+      diag(invalid) <- FALSE
+      drop_all_invalid <- apply(invalid, 1, all)
+      if(any(drop_all_invalid)){
+        dm <- dm[!drop_all_invalid, !drop_all_invalid, drop = FALSE]
+      }
+
+      if(nrow(dm) < 2){
+        stop(invalid_message)
+      }
+
+      invalid <- is.na(dm) | !is.finite(dm)
+      diag(invalid) <- FALSE
+      drop_any_invalid <- apply(invalid, 1, any)
+      if(any(drop_any_invalid)){
+        dm <- dm[!drop_any_invalid, !drop_any_invalid, drop = FALSE]
+      }
+
+      if(nrow(dm) < 2){
+        stop(invalid_message)
+      }
+
+      invalid <- is.na(dm) | !is.finite(dm)
+      diag(invalid) <- FALSE
+      if(any(invalid)){
+        stop("Invalid distances remain after filtering. Please construct the distance matrix outside ReMIXTURE and inspect the VCF for missing-data problems.")
+      }
+
+      dm
+    },
+
+    distance_matrix_from_vcf_inputs = function(vcf_file, sample_table){
+      elapsed_string <- function(start_time){
+        sprintf("%.2f sec", proc.time()[["elapsed"]] - start_time)
+      }
+
+      total_start <- proc.time()[["elapsed"]]
+      snprelate_verbose <- interactive()
+
+      if(!requireNamespace("SNPRelate", quietly = TRUE)){
+        stop("Reading VCF input requires the 'SNPRelate' package. Install it from Bioconductor and try again.")
+      }
+      if(!is.character(vcf_file) || length(vcf_file) != 1L || is.na(vcf_file) || vcf_file == ""){
+        stop("`vcf_file` must be a length-1 character path.")
+      }
+      if(!file.exists(vcf_file)){
+        stop("`vcf_file` does not exist: ", vcf_file)
+      }
+      if(grepl("\\.bcf$", vcf_file, ignore.case = TRUE)){
+        stop("Only .vcf and .vcf.gz input files are supported. Please convert the BCF file to VCF or VCF.GZ before using ReMIXTURE.")
+      }
+      if(!grepl("\\.vcf(\\.gz)?$", vcf_file, ignore.case = TRUE)){
+        stop("Only .vcf and .vcf.gz input files are supported.")
+      }
+
+      stage_start <- proc.time()[["elapsed"]]
+      ce("\tValidating sample table ...")
+      st <- private$validate_variant_sample_table(sample_table)
+      ce("\tValidating sample table ... done (", elapsed_string(stage_start), ")")
+
+      gds_tmp_fname <- tempfile(fileext = ".gds")
+      gds_handle <- NULL
+
+      on.exit({
+        if(!is.null(gds_handle)){
+          tryCatch(
+            SNPRelate::snpgdsClose(gds_handle),
+            error = function(e) NULL
+          )
+        }
+        if(file.exists(gds_tmp_fname)){
+          unlink(gds_tmp_fname)
+        }
+      }, add = TRUE)
+
+      stage_start <- proc.time()[["elapsed"]]
+      ce("\tConverting VCF to temporary GDS ...")
+      tryCatch(
+        SNPRelate::snpgdsVCF2GDS(
+          vcf_file,
+          out.fn = gds_tmp_fname,
+          method = "biallelic.only",
+          verbose = snprelate_verbose
+        ),
+        error = function(e){
+          stop("VCF could not be converted to GDS: ", conditionMessage(e))
+        }
+      )
+      ce("\tConverting VCF to temporary GDS ... done (", elapsed_string(stage_start), ")")
+
+      gds_handle <- tryCatch(
+        SNPRelate::snpgdsOpen(gds_tmp_fname),
+        error = function(e){
+          stop("VCF was converted to GDS, but the temporary GDS file could not be opened: ", conditionMessage(e))
+        }
+      )
+
+      stage_start <- proc.time()[["elapsed"]]
+      ce("\tComputing IBS matrix ...")
+      ibs <- tryCatch(
+        SNPRelate::snpgdsIBS(
+          gds_handle,
+          sample.id = st$sample,
+          missing.rate = NaN,
+          remove.monosnp = FALSE,
+          num.thread = NA_real_,
+          verbose = snprelate_verbose
+        ),
+        error = function(e){
+          stop("IBS calculation failed for the provided VCF: ", conditionMessage(e))
+        }
+      )
+      ce("\tComputing IBS matrix ... done (", elapsed_string(stage_start), ")")
+
+      stage_start <- proc.time()[["elapsed"]]
+      ce("\tConverting IBS to distance matrix ...")
+      sample_list <- ibs$sample.id
+      missing_samples <- setdiff(st$sample, sample_list)
+      if(length(missing_samples) > 0){
+        stop(
+          "`sample_table` contains sample IDs that could not be mapped to VCF samples. Examples: ",
+          paste(utils::head(missing_samples, 5), collapse = ", ")
+        )
+      }
+
+      region_labels <- st$region[match(sample_list, st$sample)]
+
+      if(anyNA(region_labels)){
+        stop(
+          "Internal mapping error: VCF samples were returned by SNPRelate, but some could not be mapped back to `sample_table$region`."
+        )
+      }
+
+      dm <- 1 - ibs$ibs
+      colnames(dm) <- rownames(dm) <- region_labels
+      ce("\tConverting IBS to distance matrix ... done (", elapsed_string(stage_start), ")")
+
+      stage_start <- proc.time()[["elapsed"]]
+      ce("\tFiltering invalid distances ...")
+      dm <- private$filter_invalid_distance_samples(dm)
+      ce("\tFiltering invalid distances ... done (", elapsed_string(stage_start), ")")
+
+      ce("\tDone. Total elapsed time: ", elapsed_string(total_start))
+
+      dm
     }
   ),
 
@@ -230,10 +422,10 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
     },
 
     #' @field mds
-    #' Return the mds data (created when `<ReMIXTURE_object>$plotMDS()` is run)
+    #' Return the mds data (created when `<ReMIXTURE_object>$plot_MDS()` is run)
     mds=function(){
       if(is.null(private$mdsPlot)){
-        stop("MDS has not been produced. Make it using e.g. `<ReMIXTURE_object>$plotMDS()`")
+        stop("MDS has not been produced. Make it using e.g. `<ReMIXTURE_object>$plot_MDS()`")
       }
       return(copy(private$mdsPlot))
     }
@@ -247,39 +439,59 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
 
     #' @description
     #' Create a new ReMIXTURE object.
-    #' @param distance_matrix \[no default\] An all-vs-all, full numeric distance matrix, with rownames and colnames giving the region of origin of the corresponding individual.
-    #' @param region_table \[no default\] A data.table describing the longitudes/latitudes of each region, with columns named "region" (character), and "lon" and "lat" (numeric or integer). The "region" column must have names corresponding to all the row/column names of the distance matrix.
+    #' @param distance_matrix \[NULL\] An all-vs-all, full numeric distance matrix, with rownames and colnames giving the region of origin of the corresponding individual.
+    #' @param region_table \[no default\] A data.table or data.frame describing the longitudes/latitudes of each region, with columns named "region" (character), and "lon" and "lat" (numeric or integer). The "region" column must have names corresponding to all the row/column names of the distance matrix.
+    #' @param vcf_file \[NULL\] Path to a `.vcf` or `.vcf.gz` file. Provide this instead of `distance_matrix` to build the matrix via `SNPRelate`.
+    #' @param sample_table \[NULL\] A data.frame or data.table with character columns named `sample` and `region`, mapping VCF sample IDs to ReMIXTURE regions.
     #' @return A new ReMIXTURE object.
-    initialize = function(distance_matrix,region_table){
+    initialize = function(
+      distance_matrix = NULL,
+      region_table,
+      vcf_file = NULL,
+      sample_table = NULL
+    ){
 
 
       ce("------------------------------------------------")
       ce("Initialising ReMixture object ...")
       ce("------------------------------------------------\n")
 
+      if(!is.null(distance_matrix) && !is.null(vcf_file)){
+        stop("Provide either `distance_matrix` or `vcf_file`, not both.")
+      }
+      if(is.null(distance_matrix) && is.null(vcf_file)){
+        stop("Provide either `distance_matrix` or `vcf_file`.")
+      }
+      if(is.null(distance_matrix)){
+        ce("\tConstructing distance matrix from VCF input ...")
+        distance_matrix <- private$distance_matrix_from_vcf_inputs(
+          vcf_file = vcf_file,
+          sample_table = sample_table
+        )
+      }
+
+      ce("\tModifying distance matrix if necessary ... ")
+      bad_diagonal <- is.na(diag(distance_matrix)) | is.infinite(diag(distance_matrix))
+      if(any(bad_diagonal)){
+        ce("Diagonals of distance matrix contain `NA` or +/-Inf --- these will be replaced by zeroes.")
+        diag_values <- diag(distance_matrix)
+        diag_values[bad_diagonal] <- 0
+        diag(distance_matrix) <- diag_values
+      }
 
       ce("\tValidating input distance matrix ...")
       private$validate_m(distance_matrix)
 
       ce("\tValidating input region table ...")
-      private$validate_rt(region_table)
+      region_table <- private$validate_rt(region_table)
 
       ce("\tChecking distance matrix and region table compatibility ...")
       private$validate_dm_rt(distance_matrix,region_table)
 
-      ce("\tModifying distance matrix if necessary ... ")
-
-      if (all(is.na(diag(distance_matrix)))){
-        ce("Diagonals of distance matrix all `NA` --- these will be replaced by zeroes.")
-        diag(distance_matrix) <- 0
-      } else if (all(is.infinite(diag(distance_matrix)))){
-        ce("Diagonals of distance matrix are all +/- Inf --- these will be replaced by zeroes. Be sure to assure the matrix has larger values for more distant pairs.")
-        diag(distance_matrix) <- 0
-      }
       if(any(distance_matrix>1)){
         ce("Distance matrix has values > 1, and will now have all entries linearly scaled to fit the range [0,1]. If this is an issue, please provide a pre-scaled distance matrix.")
         distance_matrix <- distance_matrix %>% scale_between(0,1)
-        stopifnot(all(distance_matrix[diag(distance_matrix)]==0))
+        stopifnot(all(diag(distance_matrix)==0))
       }
 
       ce("\tTrimming region table if necessary ... ")
@@ -298,6 +510,22 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
       ce("\n------------------------------------------------")
       ce("Initialisation complete.")
       ce("------------------------------------------------")
+    },
+
+    #' @description
+    #' Build a pairwise distance matrix directly from a `.vcf` or `.vcf.gz` file using `SNPRelate`.
+    #' Direct `.bcf` input is not supported by this helper.
+    #'
+    #' The VCF is converted to a temporary GDS file with `snpgdsVCF2GDS()`, IBS is computed with `snpgdsIBS()`, and the distance matrix is returned as `1 - ibs`.
+    #'
+    #' @param vcf_file \[no default\] Path to a `.vcf` or `.vcf.gz` file.
+    #' @param sample_table \[no default\] A data.frame or data.table with character columns named `sample` and `region`.
+    #' @return A full square numeric distance matrix with region labels in the row and column names.
+    distance_matrix_from_vcf = function(vcf_file, sample_table){
+      private$distance_matrix_from_vcf_inputs(
+        vcf_file = vcf_file,
+        sample_table = sample_table
+      )
     },
 
     #### RUN ####
@@ -758,10 +986,15 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
 
       rt[,uniqueDiv:=private$results[[run]]$overlap[r,r],by=.(r=region)] # could just pull out diagonal but this seems safer
       rt <- private$rt[rt,on=.(region)]
-      maxDiv <- max(rt$totDiv)
-      rt[,wTotDiv   := totDiv/maxDiv    * width_max]
-      rt[,wUniqueDiv:= uniqueDiv/maxDiv * width_max]
-      wst <- st/maxDiv*width_max
+      width_scaling <- compute_plot_width_scaling(
+        totDiv = rt$totDiv,
+        uniqueDiv = rt$uniqueDiv,
+        overlap = st,
+        width_max = width_max
+      )
+      rt[,wTotDiv := width_scaling$wTotDiv]
+      rt[,wUniqueDiv := width_scaling$wUniqueDiv]
+      wst <- width_scaling$wst
 
       ct <- if(is.null(curvature_matrix)){
         matrix(0.0,ncol=nrow(rt),nrow=nrow(rt),dimnames=list(rt$region,rt$region))
@@ -777,7 +1010,12 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
       if(is.null(alpha_max)){
         at[,] <- 1.0
       } else {
-        at[,] <- at/max(at)*alpha_max
+        maxAlphaSource <- suppressWarnings(max(at, na.rm = TRUE))
+        if(!is.finite(maxAlphaSource) || maxAlphaSource <= 0){
+          at[,] <- 0.0
+        } else {
+          at[,] <- at/maxAlphaSource*alpha_max
+        }
       }
       plotMiddle <- findCentreLL(range_lon,range_lat)
       trt <- copy(rt) %>% rotateLatLonDtLL(-plotMiddle[1],-plotMiddle[2],splitPlotGrps=F)

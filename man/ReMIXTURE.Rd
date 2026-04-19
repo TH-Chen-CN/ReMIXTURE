@@ -137,7 +137,7 @@ rm$run(
 
 \item{\code{run_results}}{Return the raw results of ReMIXTURE runs (runs must be first performed with \verb{<ReMIXTURE_object>$run()})}
 
-\item{\code{mds}}{Return the mds data (created when \verb{<ReMIXTURE_object>$plotMDS()} is run)}
+\item{\code{mds}}{Return the mds data (created when \verb{<ReMIXTURE_object>$plot_MDS()} is run)}
 }
 \if{html}{\out{</div>}}
 }
@@ -145,6 +145,7 @@ rm$run(
 \subsection{Public methods}{
 \itemize{
 \item \href{#method-ReMIXTURE-new}{\code{ReMIXTURE$new()}}
+\item \href{#method-ReMIXTURE-distance_matrix_from_vcf}{\code{ReMIXTURE$distance_matrix_from_vcf()}}
 \item \href{#method-ReMIXTURE-run}{\code{ReMIXTURE$run()}}
 \item \href{#method-ReMIXTURE-plot_results_grid}{\code{ReMIXTURE$plot_results_grid()}}
 \item \href{#method-ReMIXTURE-plot_clustercounts}{\code{ReMIXTURE$plot_clustercounts()}}
@@ -161,20 +162,51 @@ rm$run(
 \subsection{Method \code{new()}}{
 Create a new ReMIXTURE object.
 \subsection{Usage}{
-\if{html}{\out{<div class="r">}}\preformatted{ReMIXTURE$new(distance_matrix, region_table)}\if{html}{\out{</div>}}
+\if{html}{\out{<div class="r">}}\preformatted{ReMIXTURE$new(
+  distance_matrix = NULL,
+  region_table,
+  vcf_file = NULL,
+  sample_table = NULL
+)}\if{html}{\out{</div>}}
 }
 
 \subsection{Arguments}{
 \if{html}{\out{<div class="arguments">}}
 \describe{
-\item{\code{distance_matrix}}{[no default] An all-vs-all, full numeric distance matrix, with rownames and colnames giving the region of origin of the corresponding individual.}
+\item{\code{distance_matrix}}{[NULL] An all-vs-all, full numeric distance matrix, with rownames and colnames giving the region of origin of the corresponding individual.}
 
-\item{\code{region_table}}{[no default] A data.table describing the longitudes/latitudes of each region, with columns named "region" (character), and "lon" and "lat" (numeric or integer). The "region" column must have names corresponding to all the row/column names of the distance matrix.}
+\item{\code{region_table}}{[no default] A data.table or data.frame describing the longitudes/latitudes of each region, with columns named "region" (character), and "lon" and "lat" (numeric or integer). The "region" column must have names corresponding to all the row/column names of the distance matrix.}
+
+\item{\code{vcf_file}}{[NULL] Path to a \code{.vcf} or \code{.vcf.gz} file. Provide this instead of \code{distance_matrix} to build the matrix with \code{SNPRelate}.}
+
+\item{\code{sample_table}}{[NULL] A data.frame or data.table with character columns named \code{sample} and \code{region}, mapping VCF sample IDs to ReMIXTURE regions.}
 }
 \if{html}{\out{</div>}}
 }
 \subsection{Returns}{
 A new ReMIXTURE object.
+}
+}
+\if{html}{\out{<hr>}}
+\if{html}{\out{<a id="method-ReMIXTURE-distance_matrix_from_vcf"></a>}}
+\if{latex}{\out{\hypertarget{method-ReMIXTURE-distance_matrix_from_vcf}{}}}
+\subsection{Method \code{distance_matrix_from_vcf()}}{
+Build a pairwise distance matrix directly from a \code{.vcf} or \code{.vcf.gz} file using \code{SNPRelate}. Direct \code{.bcf} input is not supported by this helper.
+\subsection{Usage}{
+\if{html}{\out{<div class="r">}}\preformatted{ReMIXTURE$distance_matrix_from_vcf(vcf_file, sample_table)}\if{html}{\out{</div>}}
+}
+
+\subsection{Arguments}{
+\if{html}{\out{<div class="arguments">}}
+\describe{
+\item{\code{vcf_file}}{[no default] Path to a \code{.vcf} or \code{.vcf.gz} file.}
+
+\item{\code{sample_table}}{[no default] A data.frame or data.table with character columns named \code{sample} and \code{region}.}
+}
+\if{html}{\out{</div>}}
+}
+\subsection{Returns}{
+A full square numeric distance matrix with region labels in the row and column names.
 }
 }
 \if{html}{\out{<hr>}}

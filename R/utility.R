@@ -1,6 +1,10 @@
 
 ce <- function(...){   cat(paste0(...,"\n"), sep='', file=stderr()) %>% eval(envir = globalenv() ) %>% invisible() }
 
+isBehaved <- function(x){
+  !(is.na(x) | is.null(x) | is.infinite(x) | is.nan(x))
+}
+
 argGiven <- function(x){
   !is.null(x)
 }

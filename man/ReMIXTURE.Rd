@@ -9,7 +9,11 @@ ReMIXTURE is a tool for visualising how genetic (or any) diversity in a populati
 It produces intuitive (and \href{https://github.com/mtrw/ReMIXTURE/blob/main/README.md}{pretty}!) plots.
 These plots are based on ReMIXTURE's diversity metric, which is designed to be maximally intuitive. They work like Venn diagrams: Diversity in a group is partitioned into diversity that is unique to that group, and that which is overlapped by the diversity in other groups.
 
-ReMIXTURE will work on any dataset giving the pairwise distances between a collection of samples (say, at least 10?) from each of some collection of regions (or groups, more broadly). It requires just a pairwise distance matrix (which can provide any metric you choose, such as IBS distances for genetic data), and a table describing where on Earth each region/group is located (latitude and longitude), which is used for plotting only.
+ReMIXTURE will work on any dataset given two pieces of data:
+\itemize{
+\item (1) A matrix of pairwise distances between a collection of samples (say, at least 10?) from each of some collection of regions (or groups, more broadly). This may contain any metric you choose such as IBS distances for genetic data. ReMIXTURE can automatically create an IBS distance matrix given \code{.vcf} / \code{.vcf.gz} file, using the package \code{SNPRelate}, this will require an additional table mapping the sample names in the VCF file to regions.
+\item (2) A table describing where on Earth each region/group is located (latitude and longitude), which is used for plotting only.
+}
 \subsection{\emph{GETTING STARTED?}}{
 
 Scroll down and follow the short tutorial in the \emph{examples} section.
@@ -177,7 +181,7 @@ Create a new ReMIXTURE object.
 
 \item{\code{region_table}}{[no default] A data.table or data.frame describing the longitudes/latitudes of each region, with columns named "region" (character), and "lon" and "lat" (numeric or integer). The "region" column must have names corresponding to all the row/column names of the distance matrix.}
 
-\item{\code{vcf_file}}{[NULL] Path to a \code{.vcf} or \code{.vcf.gz} file. Provide this instead of \code{distance_matrix} to build the matrix with \code{SNPRelate}.}
+\item{\code{vcf_file}}{[NULL] Path to a \code{.vcf} or \code{.vcf.gz} file. Provide this instead of \code{distance_matrix} to build the matrix via \code{SNPRelate}.}
 
 \item{\code{sample_table}}{[NULL] A data.frame or data.table with character columns named \code{sample} and \code{region}, mapping VCF sample IDs to ReMIXTURE regions.}
 }
@@ -191,7 +195,10 @@ A new ReMIXTURE object.
 \if{html}{\out{<a id="method-ReMIXTURE-distance_matrix_from_vcf"></a>}}
 \if{latex}{\out{\hypertarget{method-ReMIXTURE-distance_matrix_from_vcf}{}}}
 \subsection{Method \code{distance_matrix_from_vcf()}}{
-Build a pairwise distance matrix directly from a \code{.vcf} or \code{.vcf.gz} file using \code{SNPRelate}. Direct \code{.bcf} input is not supported by this helper.
+Build a pairwise distance matrix directly from a \code{.vcf} or \code{.vcf.gz} file using \code{SNPRelate}.
+Direct \code{.bcf} input is not supported by this helper.
+
+The VCF is converted to a temporary GDS file with \code{snpgdsVCF2GDS()}, IBS is computed with \code{snpgdsIBS()}, and the distance matrix is returned as \code{1 - ibs}.
 \subsection{Usage}{
 \if{html}{\out{<div class="r">}}\preformatted{ReMIXTURE$distance_matrix_from_vcf(vcf_file, sample_table)}\if{html}{\out{</div>}}
 }

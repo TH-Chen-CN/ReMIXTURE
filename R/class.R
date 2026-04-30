@@ -6,7 +6,9 @@
 #' It produces intuitive (and [pretty](https://github.com/mtrw/ReMIXTURE/blob/main/README.md)!) plots.
 #' These plots are based on ReMIXTURE's diversity metric, which is designed to be maximally intuitive. They work like Venn diagrams: Diversity in a group is partitioned into diversity that is unique to that group, and that which is overlapped by the diversity in other groups.
 #'
-#' ReMIXTURE will work on any dataset giving the pairwise distances between a collection of samples (say, at least 10?) from each of some collection of regions (or groups, more broadly). It requires either a pairwise distance matrix (which can provide any metric you choose, such as IBS distances for genetic data), or a `.vcf` / `.vcf.gz` file that can be converted to an IBS distance matrix via `SNPRelate`, and a table describing where on Earth each region/group is located (latitude and longitude), which is used for plotting only.
+#' ReMIXTURE will work on any dataset given two pieces of data:
+#' - (1) A matrix of pairwise distances between a collection of samples (say, at least 10?) from each of some collection of regions (or groups, more broadly). This may contain any metric you choose such as IBS distances for genetic data. ReMIXTURE can automatically create an IBS distance matrix given `.vcf` / `.vcf.gz` file, using the package `SNPRelate`, this will require an additional table mapping the sample names in the VCF file to regions.
+#' - (2) A table describing where on Earth each region/group is located (latitude and longitude), which is used for plotting only.
 #'
 #' ## *GETTING STARTED?*
 #' Scroll down and follow the short tutorial in the *examples* section.
@@ -245,32 +247,25 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
         stop(invalid_message)
       }
 
-      invalid <- is.na(dm) | !is.finite(dm)
-      diag(invalid) <- FALSE
+      #browser()
+      invalid <- !isBehaved(dm)
       drop_all_invalid <- apply(invalid, 1, all)
       if(any(drop_all_invalid)){
         dm <- dm[!drop_all_invalid, !drop_all_invalid, drop = FALSE]
       }
-
       if(nrow(dm) < 2){
         stop(invalid_message)
       }
-
-      invalid <- is.na(dm) | !is.finite(dm)
-      diag(invalid) <- FALSE
+      invalid <- !isBehaved(dm)
+      #diag(invalid) <- FALSE
       drop_any_invalid <- apply(invalid, 1, any)
+      drop_all_invalid[1:10]
       if(any(drop_any_invalid)){
         dm <- dm[!drop_any_invalid, !drop_any_invalid, drop = FALSE]
       }
 
       if(nrow(dm) < 2){
         stop(invalid_message)
-      }
-
-      invalid <- is.na(dm) | !is.finite(dm)
-      diag(invalid) <- FALSE
-      if(any(invalid)){
-        stop("Invalid distances remain after filtering. Please construct the distance matrix outside ReMIXTURE and inspect the VCF for missing-data problems.")
       }
 
       dm
@@ -301,7 +296,7 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
       }
 
       stage_start <- proc.time()[["elapsed"]]
-      ce("\tValidating sample table ...")
+      ce("\tValidating sample table and ...")
       st <- private$validate_variant_sample_table(sample_table)
       ce("\tValidating sample table ... done (", elapsed_string(stage_start), ")")
 

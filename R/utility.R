@@ -45,6 +45,17 @@ clampNearestLon <- function(lon,range_lon,sideFlag=FALSE){
   }
 }
 
+clampNearestLat <- function(lat,range_lat){
+  if(length(range_lat) != 2L){
+    stop("range_lat must be a numeric vector of length 2")
+  }
+
+  lower <- min(range_lat, na.rm = TRUE)
+  upper <- max(range_lat, na.rm = TRUE)
+
+  pmax(lower, pmin(upper, lat))
+}
+
 mat2dtLL <- function(m){ data.table(lon=m[1,],lat=m[2,]) }
 mat2dtXY <- function(m){ data.table(x=m[1,],y=m[2,]) }
 # matrix(1:4,byr=TRUE,nc=2) %T>% print %>% mat2dtXY
@@ -664,10 +675,10 @@ emptyPlot <- function(rangeX,rangeY,...){
   )
 }
 
-plotEmptyMap <- function( range_lon=c(-180,180), range_lat=c(-90,90), projFun=equirectangular, ... ){
+plotEmptyMap <- function( range_lon=c(-180,180), range_lat=c(-90,90), projFun=equirectangular, xaxs="r", yaxs="r", ... ){
   p <- makeBorder(range_lon,range_lat) %>%
     projFun(projColNames=c("x","y"))
-  emptyPlot(range(p$x),range(p$y),...)
+  emptyPlot(range(p$x),range(p$y),xaxs=xaxs,yaxs=yaxs,...)
   return(data.table(x=range(p$x),y=range(p$y)) %>% invisible)
 }
 

@@ -25,6 +25,17 @@ The ReMIXTURE concept was first attempted in Tripodi & Rabanus-Wallace, et al. (
 
 Install using `devtools::install_github("https://github.com/mtrw/ReMIXTURE")`, and follow the tutorial in ?ReMIXTURE (in the examples section). If you want to build a distance matrix from VCF input, install `SNPRelate` from Bioconductor first.
 
+For composite map figures, first inspect H behaviour with the existing ReMIXTURE workflow, then use the selected run for display:
+
+```r
+rm$run(...)
+rm$plot_h_optimisation()
+rm$plot_results_grid()
+rm$plot_distance_densities(HdistFromRun = selected_run)
+
+rm$plot_maps_composite(run = selected_run)
+```
+
 # Future
 
 Any questions, suggestions, feedback please email me! tim.rabanuswallace@unimelb.edu.au.

@@ -385,6 +385,907 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
       ce("\tDone. Total elapsed time: ", elapsed_string(total_start))
 
       dm
+    },
+
+    normalize_main_panel = function(main_panel){
+      if(!(is.numeric(main_panel) || is.integer(main_panel)) || length(main_panel) != 4){
+        stop("`main_panel` must be a numeric vector of length 4.")
+      }
+
+      panel_vals <- if(is.null(names(main_panel))){
+        as.numeric(main_panel)
+      } else {
+        required_names <- c("left", "right", "bottom", "top")
+        if(!all(required_names %in% names(main_panel))){
+          stop("Named `main_panel` must include `left`, `right`, `bottom`, and `top`.")
+        }
+        as.numeric(main_panel[required_names])
+      }
+      names(panel_vals) <- c("left", "right", "bottom", "top")
+
+      if(any(!is.finite(panel_vals))){
+        stop("`main_panel` values must be finite.")
+      }
+      if(any(panel_vals < 0 | panel_vals > 1)){
+        stop("`main_panel` values must fall within [0,1].")
+      }
+      if(panel_vals["left"] >= panel_vals["right"]){
+        stop("`main_panel` must satisfy `left < right`.")
+      }
+      if(panel_vals["bottom"] >= panel_vals["top"]){
+        stop("`main_panel` must satisfy `bottom < top`.")
+      }
+
+      panel_vals
+    },
+
+    make_curvature_matrix = function(curvature_matrix, regions){
+      n_regions <- length(regions)
+
+      if(is.null(curvature_matrix)){
+        return(matrix(0.0, nrow = n_regions, ncol = n_regions, dimnames = list(regions, regions)))
+      }
+
+      if(is.character(curvature_matrix) && length(curvature_matrix) >= 1L && curvature_matrix[1] == "random"){
+        cm <- matrix(rnorm(n_regions^2, 0, 0.3), nrow = n_regions)
+        rownames(cm) <- colnames(cm) <- regions
+        return(cm)
+      }
+
+      if(!is.matrix(curvature_matrix)){
+        stop("`curvature_matrix` must be NULL, \"random\", or a matrix.")
+      }
+      if(!(is.numeric(curvature_matrix) || is.integer(curvature_matrix))){
+        stop("`curvature_matrix` must be numeric.")
+      }
+
+      rn <- rownames(curvature_matrix)
+      cn <- colnames(curvature_matrix)
+      has_row_names <- !is.null(rn)
+      has_col_names <- !is.null(cn)
+
+      if(has_row_names || has_col_names){
+        if(!(has_row_names && has_col_names)){
+          stop("Named `curvature_matrix` must have both rownames and colnames.")
+        }
+        if(!all(regions %in% rn) || !all(regions %in% cn)){
+          stop("Named `curvature_matrix` must include all regions in both rownames and colnames.")
+        }
+        return(curvature_matrix[regions, regions, drop = FALSE])
+      }
+
+      if(nrow(curvature_matrix) != n_regions || ncol(curvature_matrix) != n_regions){
+        stop("Unnamed `curvature_matrix` must have dimensions length(regions) x length(regions).")
+      }
+
+      cm <- curvature_matrix
+      rownames(cm) <- colnames(cm) <- regions
+      cm
+    },
+
+    get_map_plot_state = function(run, width_max, alpha_max, curvature_matrix){
+      if(private$runflag == FALSE){
+        stop("Analysis has not been run. Perform using `$run()`")
+      }
+      if(is.null(run) & length(private$results) > 1){
+        stop("Please provide a run number to plot from (consider using `<ReMIXTURE Object>$plot_h_optimisation()`, `<ReMIXTURE Object>$plot_results_grid()`, and `<ReMIXTURE Object>$plot_clustercounts()` to assess which run parameters are appropriate).")
+      }
+      if(is.null(run) & length(private$results) == 1){
+        run <- 1
+      }
+
+      st <- private$results[[run]]$overlap
+      rt <- data.table(
+        region = colnames(st),
+        totDiv = private$results[[run]]$diversity
+      )
+
+      rt[, uniqueDiv := private$results[[run]]$overlap[r, r], by = .(r = region)]
+      rt <- private$rt[rt, on = .(region)]
+
+      width_scaling <- compute_plot_width_scaling(
+        totDiv = rt$totDiv,
+        uniqueDiv = rt$uniqueDiv,
+        overlap = st,
+        width_max = width_max
+      )
+      rt[, wTotDiv := width_scaling$wTotDiv]
+      rt[, wUniqueDiv := width_scaling$wUniqueDiv]
+      wst <- width_scaling$wst
+
+      ct <- private$make_curvature_matrix(curvature_matrix, rt$region)
+
+      at <- copy(st)
+      diag(at) <- 0.0
+      if(is.null(alpha_max)){
+        at[,] <- 1.0
+      } else {
+        maxAlphaSource <- suppressWarnings(max(at, na.rm = TRUE))
+        if(!is.finite(maxAlphaSource) || maxAlphaSource <= 0){
+          at[,] <- 0.0
+        } else {
+          at[,] <- at / maxAlphaSource * alpha_max
+        }
+      }
+
+      list(
+        run = run,
+        rt = rt,
+        regions = rt$region,
+        st = st,
+        wst = wst,
+        at = at,
+        ct = ct
+      )
+    },
+
+    validate_focal_regions = function(focalRegions, regions){
+      if(is.null(focalRegions)){
+        return(regions)
+      }
+      if(!is.character(focalRegions)){
+        stop("`focalRegions` must be a character vector.")
+      }
+
+      focalRegions <- focalRegions[!duplicated(focalRegions)]
+      missing_regions <- setdiff(focalRegions, regions)
+      if(length(missing_regions) > 0){
+        stop(
+          "Unknown focal region(s): ",
+          paste(missing_regions, collapse = ", ")
+        )
+      }
+
+      focalRegions
+    },
+
+    draw_region_diversity_circle = function(trt, j, projection, shadow = FALSE, circle_scale = 1){
+      cdt <- circle_seg(trt$lon[j], trt$lat[j], radius = trt$wTotDiv[j] / 2 * circle_scale) %>% mat2dtLL()
+      udt <- circle_seg(trt$lon[j], trt$lat[j], radius = trt$wUniqueDiv[j] / 2 * circle_scale) %>% mat2dtLL()
+
+      if(shadow){
+        plotMapItem(cdt, projFun = projection, plotFun = polygon, col = "#00000055")
+      }
+      plotMapItem(cdt, projFun = projection, plotFun = polygon, col = "#000000FF")
+      plotMapItem(udt, projFun = projection, plotFun = polygon, col = "#FFFFFF")
+    },
+
+    get_region_anchors = function(trt, projection){
+      projected <- projection(
+        dtLL = trt[, .(lon, lat)],
+        projColNames = c("x", "y")
+      )
+
+      data.table(
+        region = trt$region,
+        x = grconvertX(projected$x, from = "user", to = "ndc"),
+        y = grconvertY(projected$y, from = "user", to = "ndc")
+      )
+    },
+
+    filter_visible_anchors = function(anchors, main_panel, tolerance = 0.005){
+      main_panel <- private$normalize_main_panel(main_panel)
+      anchors <- as.data.table(copy(anchors))
+
+      anchors[
+        x >= main_panel["left"] - tolerance &
+          x <= main_panel["right"] + tolerance &
+          y >= main_panel["bottom"] - tolerance &
+          y <= main_panel["top"] + tolerance
+      ][]
+    },
+
+    compute_inset_height = function(inset_width, inset_height, range_lon, range_lat, panel_aspect = NULL){
+      if(!(is.numeric(inset_width) || is.integer(inset_width)) || length(inset_width) != 1 || !is.finite(inset_width) || inset_width <= 0){
+        stop("`inset_width` must be a single positive finite number.")
+      }
+
+      if(!is.null(inset_height)){
+        if(!(is.numeric(inset_height) || is.integer(inset_height)) || length(inset_height) != 1 || !is.finite(inset_height) || inset_height <= 0){
+          stop("`inset_height` must be NULL or a single positive finite number.")
+        }
+        return(as.numeric(inset_height))
+      }
+
+      lon_span <- abs(diff(range_lon))
+      lat_span <- abs(diff(range_lat))
+      if(!is.finite(lon_span) || !is.finite(lat_span) || lon_span <= 0 || lat_span <= 0){
+        stop("`range_lon` and `range_lat` must each define a non-zero finite range.")
+      }
+
+      if(!is.null(panel_aspect)){
+        if(!(is.numeric(panel_aspect) || is.integer(panel_aspect)) || length(panel_aspect) != 1 || !is.finite(panel_aspect) || panel_aspect <= 0){
+          stop("`panel_aspect` must be NULL or a single positive finite number.")
+        }
+        target_aspect <- as.numeric(panel_aspect)
+      } else {
+        raw_aspect <- lon_span / lat_span
+        target_aspect <- max(2.2, min(2.8, raw_aspect))
+      }
+      device <- par("din")
+      computed_height <- inset_width * device[1] / (target_aspect * device[2])
+      computed_height <- max(0.10, min(0.22, computed_height))
+
+      computed_height
+    },
+
+    validate_composite_geometry = function(main_panel, inset_width, gap, outer_margin){
+      main_panel <- private$normalize_main_panel(main_panel)
+      left_capacity <- unname(main_panel["left"] - gap - outer_margin)
+      right_capacity <- unname(1 - outer_margin - main_panel["right"] - gap)
+
+      list(
+        left_capacity = left_capacity,
+        right_capacity = right_capacity
+      )
+    },
+
+    rectangles_overlap = function(a_left, a_right, a_bottom, a_top, b_left, b_right, b_bottom, b_top, tolerance = 1e-6){
+      (a_right > b_left + tolerance) &&
+        (a_left < b_right - tolerance) &&
+        (a_top > b_bottom + tolerance) &&
+        (a_bottom < b_top - tolerance)
+    },
+
+    render_map_panel = function(
+      state,
+      focalRegion,
+      range_lon,
+      range_lat,
+      projection,
+      mapData,
+      overview = FALSE,
+      diversityCirclesFocalOnly = FALSE,
+      returnAnchors = FALSE,
+      circle_scale = 1,
+      line_scale = 1,
+      targetRegions = NULL,
+      clip_to_panel = FALSE,
+      border_last = FALSE,
+      tight_axes = FALSE,
+      draw_grid = TRUE,
+      draw_title = TRUE,
+      title_cex = NULL,
+      title_line = NULL
+    ){
+      plotMiddle <- findCentreLL(range_lon, range_lat)
+      trt <- copy(state$rt) %>% rotateLatLonDtLL(-plotMiddle[1], -plotMiddle[2], splitPlotGrps = FALSE)
+
+      pe <- plotEmptyMap(
+        range_lon,
+        range_lat,
+        projFun = projection,
+        xaxs = if(tight_axes) "i" else "r",
+        yaxs = if(tight_axes) "i" else "r"
+      )
+      if(draw_grid){
+        plotMapItem(makeMapDataLatLonLines(), range_lon, range_lat, projFun = projection, plotFun = lines, col = "#00000022", lwd = 0.4)
+      }
+      plotMapItem(mapData, range_lon, range_lat, projFun = projection, plotFun = polygon, col = "#f7bf25", lwd = 0.2)
+      if(!border_last){
+        plotMapBorder(range_lon, range_lat, projFun = projection, plotEdges = pe, lwd = 4)
+      }
+      if(isTRUE(clip_to_panel)){
+        usr <- par("usr")
+        clip(usr[1], usr[2], usr[3], usr[4])
+      }
+
+      if(overview){
+        for(j in seq_len(nrow(trt))){
+          private$draw_region_diversity_circle(trt, j, projection, shadow = TRUE, circle_scale = circle_scale)
+        }
+        if(border_last){
+          plotMapBorder(range_lon, range_lat, projFun = projection, plotEdges = pe, lwd = 4)
+        }
+        if(returnAnchors){
+          return(private$get_region_anchors(trt, projection))
+        }
+        return(invisible(NULL))
+      }
+
+      i <- match(focalRegion, trt$region)
+      if(is.na(i)){
+        stop("`focalRegion` must name a valid region.")
+      }
+
+      targetRegions <- if(is.null(targetRegions)) state$regions else targetRegions
+      targetRegions <- targetRegions[targetRegions %in% trt$region]
+      targetIdx <- which(trt$region %in% targetRegions)
+
+      for(j in targetIdx){
+        if(i == j){ next }
+        ldt <- curved_rounded_line(
+          x1 = trt$lon[i], y1 = trt$lat[i],
+          x2 = trt$lon[j], y2 = trt$lat[j],
+          width = state$wst[trt$region[i], trt$region[j]] * line_scale,
+          curvature = state$ct[trt$region[i], trt$region[j]]
+        ) %>% mat2dtLL()
+        plotMapItem(
+          ldt,
+          projFun = projection,
+          plotFun = polygon,
+          col = alpha("black", state$at[trt$region[i], trt$region[j]]),
+          border = "#000000",
+          lwd = 0.15
+        )
+        if(diversityCirclesFocalOnly == FALSE){
+          private$draw_region_diversity_circle(trt, j, projection, shadow = TRUE, circle_scale = circle_scale)
+        }
+      }
+
+      private$draw_region_diversity_circle(trt, i, projection, shadow = FALSE, circle_scale = circle_scale)
+      if(border_last){
+        plotMapBorder(range_lon, range_lat, projFun = projection, plotEdges = pe, lwd = 4)
+      }
+      if(draw_title){
+        if(is.null(title_cex) && is.null(title_line)){
+          title(main = trt$region[i])
+        } else {
+          title_args <- list(main = trt$region[i])
+          if(!is.null(title_cex)){
+            title_args$cex.main <- title_cex
+          }
+          if(!is.null(title_line)){
+            title_args$line <- title_line
+          }
+          do.call(title, title_args)
+        }
+      }
+
+      if(returnAnchors){
+        return(private$get_region_anchors(trt, projection))
+      }
+      invisible(NULL)
+    },
+
+    make_composite_layout = function(anchors, focalRegions, main_panel, inset_width, inset_height){
+      main_panel <- private$normalize_main_panel(main_panel)
+      anchors <- as.data.table(copy(anchors))
+      anchors <- anchors[region %in% focalRegions]
+      if(nrow(anchors) != length(focalRegions)){
+        stop("Anchors are missing for one or more focal regions.")
+      }
+
+      anchors <- anchors[match(focalRegions, region)]
+      cx <- mean(c(main_panel["left"], main_panel["right"]))
+      cy <- mean(c(main_panel["bottom"], main_panel["top"]))
+      outer_margin <- 0.03
+      gap <- 0.045
+      label_strip <- 0.025
+      min_card_gap <- 0.025
+
+      anchors[, side := fifelse(
+        abs(x - cx) >= abs(y - cy),
+        fifelse(x >= cx, "right", "left"),
+        fifelse(y >= cy, "top", "bottom")
+      )]
+
+      distribute_intervals <- function(n, size, min_val, max_val, min_gap){
+        span <- max_val - min_val
+        if(n <= 0){
+          return(list(starts = numeric(), size = size))
+        }
+        if(span <= 0){
+          return(list(starts = rep(min_val, n), size = size))
+        }
+        adj_size <- size
+        if(n == 1){
+          start <- min_val + max(0, (span - adj_size) / 2)
+          return(list(starts = start, size = adj_size))
+        }
+        effective_gap <- min_gap
+        needed <- n * adj_size + (n - 1) * effective_gap
+        if(needed > span){
+          effective_gap <- max(0, (span - n * adj_size) / (n - 1))
+          needed <- n * adj_size + (n - 1) * effective_gap
+        }
+        start0 <- min_val + max(0, (span - needed) / 2)
+        starts <- start0 + (seq_len(n) - 1) * (adj_size + effective_gap)
+        list(starts = starts, size = adj_size)
+      }
+
+      top_dt <- anchors[side == "top"][order(x)]
+      bottom_dt <- anchors[side == "bottom"][order(x)]
+      left_dt <- anchors[side == "left"][order(-y)]
+      right_dt <- anchors[side == "right"][order(-y)]
+
+      geometry <- private$validate_composite_geometry(
+        main_panel = main_panel,
+        inset_width = inset_width,
+        gap = gap,
+        outer_margin = outer_margin
+      )
+      if(nrow(left_dt) > 0 && inset_width > geometry$left_capacity){
+        stop(
+          "Insufficient horizontal space for left-side inset panels. ",
+          "Current inset_width = ", signif(inset_width, 4),
+          ", available left capacity = ", signif(geometry$left_capacity, 4),
+          ". Reduce inset_width or move main_panel['left'] to the right."
+        )
+      }
+      if(nrow(right_dt) > 0 && inset_width > geometry$right_capacity){
+        stop(
+          "Insufficient horizontal space for right-side inset panels. ",
+          "Current inset_width = ", signif(inset_width, 4),
+          ", available right capacity = ", signif(geometry$right_capacity, 4),
+          ". Reduce inset_width or move main_panel['right'] to the left."
+        )
+      }
+
+      map_width <- inset_width
+      map_height <- inset_height
+      card_width <- map_width
+      card_height <- map_height + label_strip
+      side_map_width <- inset_width
+      side_map_height <- inset_height
+      side_card_width <- side_map_width
+      side_card_height <- side_map_height + label_strip
+      horizontal_capacity <- floor(((1 - 2 * outer_margin) + min_card_gap) / (card_width + min_card_gap))
+      if(nrow(top_dt) > horizontal_capacity){
+        stop(
+          "Insufficient horizontal space for top-side inset panels. ",
+          "Need to place ", nrow(top_dt), " panel(s) with inset_width = ", signif(inset_width, 4),
+          " and label strip height = ", signif(label_strip, 4),
+          ". Reduce focalRegions, reduce inset_width, or edit returned panels manually."
+        )
+      }
+      if(nrow(bottom_dt) > horizontal_capacity){
+        stop(
+          "Insufficient horizontal space for bottom-side inset panels. ",
+          "Need to place ", nrow(bottom_dt), " panel(s) with inset_width = ", signif(inset_width, 4),
+          " and label strip height = ", signif(label_strip, 4),
+          ". Reduce focalRegions, reduce inset_width, or edit returned panels manually."
+        )
+      }
+
+      top_card_bottom <- max(
+        outer_margin,
+        min(1 - outer_margin - card_height, main_panel["top"] + gap)
+      )
+      bottom_card_bottom <- max(
+        outer_margin,
+        min(1 - outer_margin - card_height, main_panel["bottom"] - gap - card_height)
+      )
+      bottom_card_top <- bottom_card_bottom + card_height
+
+      left_right_y_min <- outer_margin
+      left_right_y_max <- 1 - outer_margin
+      if(nrow(top_dt) > 0){
+        left_right_y_max <- min(left_right_y_max, top_card_bottom - gap)
+      }
+      if(nrow(bottom_dt) > 0){
+        left_right_y_min <- max(left_right_y_min, bottom_card_top + gap)
+      }
+      if(left_right_y_max <= left_right_y_min){
+        stop(
+          "Insufficient vertical space for side inset panels after reserving top/bottom panel bands. ",
+          "Reduce focalRegions, reduce inset_height, or adjust main_panel."
+        )
+      }
+      vertical_capacity <- floor(((left_right_y_max - left_right_y_min) + min_card_gap) / (side_card_height + min_card_gap))
+      if(nrow(left_dt) > vertical_capacity){
+        stop(
+          "Insufficient vertical space for left-side inset panels. ",
+          "Need to place ", nrow(left_dt), " panel(s) with inset_height = ", signif(inset_height, 4),
+          " and label strip height = ", signif(label_strip, 4),
+          ". Reduce focalRegions, reduce inset_height, or edit returned panels manually."
+        )
+      }
+      if(nrow(right_dt) > vertical_capacity){
+        stop(
+          "Insufficient vertical space for right-side inset panels. ",
+          "Need to place ", nrow(right_dt), " panel(s) with inset_height = ", signif(inset_height, 4),
+          " and label strip height = ", signif(label_strip, 4),
+          ". Reduce focalRegions, reduce inset_height, or edit returned panels manually."
+        )
+      }
+
+      build_side_layout <- function(side_name){
+        dt <- switch(
+          side_name,
+          top = copy(top_dt),
+          bottom = copy(bottom_dt),
+          left = copy(left_dt),
+          right = copy(right_dt)
+        )
+        if(nrow(dt) == 0){
+          return(NULL)
+        }
+
+        if(side_name %in% c("top", "bottom")){
+          x_layout <- distribute_intervals(
+            n = nrow(dt),
+            size = card_width,
+            min_val = outer_margin,
+            max_val = 1 - outer_margin,
+            min_gap = min_card_gap
+          )
+          card_left <- x_layout$starts
+          card_right <- card_left + x_layout$size
+          map_width_side <- x_layout$size
+          if(side_name == "top"){
+            card_bottom <- rep(top_card_bottom, nrow(dt))
+            card_top <- card_bottom + card_height
+            map_left <- card_left
+            map_right <- card_right
+            map_bottom <- card_bottom
+            map_top <- map_bottom + map_height
+          } else {
+            card_bottom <- rep(bottom_card_bottom, nrow(dt))
+            card_top <- card_bottom + card_height
+            map_left <- card_left
+            map_right <- card_right
+            map_top <- card_top
+            map_bottom <- map_top - map_height
+          }
+          out <- data.table(
+            region = dt$region,
+            side = side_name,
+            card_left = card_left,
+            card_right = card_right,
+            card_bottom = card_bottom,
+            card_top = card_top,
+            map_left = map_left,
+            map_right = map_right,
+            map_bottom = map_bottom,
+            map_top = map_top
+          )
+        } else {
+          y_layout <- distribute_intervals(
+            n = nrow(dt),
+            size = side_card_height,
+            min_val = left_right_y_min,
+            max_val = left_right_y_max,
+            min_gap = min_card_gap
+          )
+          card_bottom <- y_layout$starts
+          card_top <- card_bottom + y_layout$size
+          map_height_side <- side_map_height
+          card_left <- rep(
+            if(side_name == "right"){
+              main_panel["right"] + gap
+            } else {
+              main_panel["left"] - gap - side_card_width
+            },
+            nrow(dt)
+          )
+          card_right <- card_left + side_card_width
+          map_left <- card_left
+          map_right <- card_right
+          map_bottom <- card_bottom
+          map_top <- map_bottom + map_height_side
+          out <- data.table(
+            region = dt$region,
+            side = side_name,
+            card_left = card_left,
+            card_right = card_right,
+            card_bottom = card_bottom,
+            card_top = card_top,
+            map_left = map_left,
+            map_right = map_right,
+            map_bottom = map_bottom,
+            map_top = map_top
+          )
+        }
+
+        labels <- private$compute_panel_label_positions(out)
+        out <- labels[out, on = .(region)]
+        out[, `:=`(
+          left = map_left,
+          right = map_right,
+          bottom = map_bottom,
+          top = map_top
+        )]
+        out
+      }
+
+      panels <- rbindlist(
+        lapply(c("top", "right", "bottom", "left"), build_side_layout),
+        use.names = TRUE,
+        fill = TRUE
+      )
+
+      if(nrow(panels) > 0){
+        overlaps_main_idx <- which(
+          panels$map_right > main_panel["left"] + 1e-6 &
+            panels$map_left < main_panel["right"] - 1e-6 &
+            panels$map_top > main_panel["bottom"] + 1e-6 &
+            panels$map_bottom < main_panel["top"] - 1e-6
+        )
+        if(length(overlaps_main_idx) > 0){
+          stop(
+            paste0(
+              "Automatic layout overlaps the central overview for panel(s): ",
+              paste(panels$region[overlaps_main_idx], collapse = ", "),
+              ". Reduce `inset_width` or narrow `main_panel`."
+            )
+          )
+        }
+      }
+
+      if(nrow(panels) > 1){
+        for(i in seq_len(nrow(panels) - 1)){
+          for(j in (i + 1):nrow(panels)){
+            if(private$rectangles_overlap(
+              panels$map_left[i], panels$map_right[i], panels$map_bottom[i], panels$map_top[i],
+              panels$map_left[j], panels$map_right[j], panels$map_bottom[j], panels$map_top[j]
+            )){
+              stop(
+                paste0(
+                  "Automatic layout produced overlapping panels: ",
+                  panels$region[i], " and ", panels$region[j],
+                  ". Consider passing fewer focalRegions or editing returned panels."
+                )
+              )
+            }
+          }
+        }
+      }
+
+      panels[match(focalRegions, region)][]
+    },
+
+    validate_composite_layout = function(panels, focalRegions, main_panel){
+      if(!(is.data.frame(panels) || data.table::is.data.table(panels))){
+        stop("`panels` must be a data.frame or data.table.")
+      }
+
+      panels <- as.data.table(copy(panels))
+      main_panel <- private$normalize_main_panel(main_panel)
+      label_strip <- 0.025
+      outer_margin <- 0.03
+      gap <- 0.045
+      has_map_schema <- all(c("map_left", "map_right", "map_bottom", "map_top") %in% colnames(panels))
+      has_old_schema <- all(c("left", "right", "bottom", "top") %in% colnames(panels))
+      if(!has_map_schema && !has_old_schema){
+        stop("`panels` must contain either `left/right/bottom/top` or `map_left/map_right/map_bottom/map_top`.")
+      }
+      if(!has_map_schema){
+        panels[, `:=`(
+          map_left = left,
+          map_right = right,
+          map_bottom = bottom,
+          map_top = top
+        )]
+      }
+      extra_regions <- setdiff(panels$region, focalRegions)
+      if(length(extra_regions) > 0){
+        stop(
+          "`panels` includes region(s) without visible anchors or outside the selected composite set: ",
+          paste(extra_regions, collapse = ", ")
+        )
+      }
+
+      panels <- panels[region %in% focalRegions]
+      if(anyDuplicated(panels$region)){
+        stop("`panels` must contain at most one row per region.")
+      }
+      if(!setequal(panels$region, focalRegions)){
+        stop("`panels` must contain exactly one row for each focal region.")
+      }
+
+      if(!"side" %in% colnames(panels)){
+        cx <- mean(c(main_panel["left"], main_panel["right"]))
+        cy <- mean(c(main_panel["bottom"], main_panel["top"]))
+        panels[, `:=`(
+          center_x = (map_left + map_right) / 2,
+          center_y = (map_bottom + map_top) / 2
+        )]
+        panels[, side := fifelse(
+          abs(center_x - cx) >= abs(center_y - cy),
+          fifelse(center_x >= cx, "right", "left"),
+          fifelse(center_y >= cy, "top", "bottom")
+        )]
+        panels[, c("center_x", "center_y") := NULL]
+      }
+
+      if(!all(c("card_left", "card_right", "card_bottom", "card_top") %in% colnames(panels))){
+        panels[, `:=`(
+          card_left = map_left,
+          card_right = map_right,
+          card_bottom = fifelse(side == "bottom", map_bottom - label_strip, map_bottom),
+          card_top = fifelse(side == "bottom", map_top, map_top + label_strip)
+        )]
+      }
+
+      need_labels <- !all(c("label_x", "label_y", "label_adj_x", "label_adj_y") %in% colnames(panels))
+      if(need_labels){
+        labels <- private$compute_panel_label_positions(panels)
+        panels <- labels[panels, on = .(region)]
+      }
+
+      overlaps_main_idx <- which(
+        panels$map_right > main_panel["left"] + 1e-6 &
+          panels$map_left < main_panel["right"] - 1e-6 &
+          panels$map_top > main_panel["bottom"] + 1e-6 &
+          panels$map_bottom < main_panel["top"] - 1e-6
+      )
+      if(length(overlaps_main_idx) > 0){
+        warning(
+          paste0(
+            "Custom `panels` overlap the central overview: ",
+            paste(panels$region[overlaps_main_idx], collapse = ", "),
+            ". Adjust panel coordinates or narrow `main_panel`."
+          ),
+          call. = FALSE
+        )
+      }
+
+      left_capacity <- unname(main_panel["left"] - gap - outer_margin)
+      right_capacity <- unname(1 - outer_margin - main_panel["right"] - gap)
+      left_width_excess <- panels[side == "left", max(map_right - map_left, na.rm = TRUE)] > left_capacity
+      right_width_excess <- panels[side == "right", max(map_right - map_left, na.rm = TRUE)] > right_capacity
+      if(isTRUE(left_width_excess) || isTRUE(right_width_excess)){
+        warning(
+          paste0(
+            "Custom `panels` may overlap the central overview: side-panel width exceeds available side capacity ",
+            "(left capacity=",
+            signif(left_capacity, 4),
+            ", right capacity=",
+            signif(right_capacity, 4),
+            "). Consider reducing panel width or narrowing `main_panel`."
+          ),
+          call. = FALSE
+        )
+      }
+
+      panels[, `:=`(
+        left = map_left,
+        right = map_right,
+        bottom = map_bottom,
+        top = map_top
+      )]
+
+      numeric_cols <- c(
+        "map_left", "map_right", "map_bottom", "map_top",
+        "card_left", "card_right", "card_bottom", "card_top",
+        "label_x", "label_y", "label_adj_x", "label_adj_y"
+      )
+      for(col_name in numeric_cols){
+        if(any(!is.finite(panels[[col_name]]))){
+          stop("`panels` coordinates must be finite.")
+        }
+      }
+      if(any(
+        panels$map_left < 0 | panels$map_right > 1 |
+          panels$map_bottom < 0 | panels$map_top > 1 |
+          panels$card_left < 0 | panels$card_right > 1 |
+          panels$card_bottom < 0 | panels$card_top > 1
+      )){
+        stop("`panels` map/card coordinates must fall within [0,1].")
+      }
+      if(any(panels$map_left >= panels$map_right)){
+        stop("Each `panels` row must satisfy `map_left < map_right`.")
+      }
+      if(any(panels$map_bottom >= panels$map_top)){
+        stop("Each `panels` row must satisfy `map_bottom < map_top`.")
+      }
+      if(any(panels$card_left > panels$map_left | panels$card_right < panels$map_right)){
+        stop("Card rectangles must contain map rectangles horizontally.")
+      }
+      if(any(panels$card_bottom > panels$map_bottom | panels$card_top < panels$map_top)){
+        stop("Card rectangles must contain map rectangles vertically.")
+      }
+
+      panels[match(focalRegions, region)][]
+    },
+
+    make_leader_segments = function(panels, anchors){
+      panels <- as.data.table(copy(panels))
+      anchors <- as.data.table(copy(anchors))
+
+      anchor_idx <- match(panels$region, anchors$region)
+      if(any(is.na(anchor_idx))){
+        stop("Anchors are missing for one or more panels.")
+      }
+
+      x <- anchors$x[anchor_idx]
+      y <- anchors$y[anchor_idx]
+      x0 <- fifelse(
+        panels$side %in% c("top", "bottom"),
+        (panels$map_left + panels$map_right) / 2,
+        fifelse(panels$side == "left", panels$map_right, panels$map_left)
+      )
+      y0 <- fifelse(
+        panels$side %in% c("left", "right"),
+        (panels$map_bottom + panels$map_top) / 2,
+        fifelse(panels$side == "top", panels$map_bottom, panels$map_top)
+      )
+
+      data.table(
+        region = panels$region,
+        x0 = x0,
+        y0 = y0,
+        x1 = x,
+        y1 = y
+      )
+    },
+
+    render_leader_segments = function(leader_segments){
+      leader_segments <- as.data.table(copy(leader_segments))
+      if(nrow(leader_segments) == 0){
+        return(invisible(NULL))
+      }
+
+      private$begin_ndc_overlay()
+      with(leader_segments, segments(x0, y0, x1, y1, lty = 2, lwd = 0.8, col = "#00000066"))
+
+      invisible(NULL)
+    },
+
+    begin_ndc_overlay = function(){
+      par(fig = c(0, 1, 0, 1), mar = c(0, 0, 0, 0), new = TRUE, xpd = NA)
+      plot.new()
+      plot.window(xlim = c(0, 1), ylim = c(0, 1), xaxs = "i", yaxs = "i")
+      invisible(NULL)
+    },
+
+    compute_panel_label_positions = function(
+      panels,
+      panel_label_cex = 0.75,
+      label_gap = 0.014,
+      min_label_gap = 0.008
+    ){
+      panels <- as.data.table(copy(panels))
+      if(nrow(panels) == 0){
+        return(data.table(region = character(), x = numeric(), y = numeric(), adj_x = numeric(), adj_y = numeric()))
+      }
+
+      label_strip <- 0.025
+      if(!all(c("map_left", "map_right", "map_bottom", "map_top") %in% colnames(panels))){
+        panels[, `:=`(
+          map_left = left,
+          map_right = right,
+          map_bottom = bottom,
+          map_top = top
+        )]
+      }
+
+      device_size <- par("din")
+      panels[, label_width := strwidth(region, cex = panel_label_cex, units = "inches") / device_size[1]]
+      panels[, label_height := strheight(region, cex = panel_label_cex, units = "inches") / device_size[2]]
+
+      panels[, `:=`(
+        label_x = (map_left + map_right) / 2,
+        label_y = fifelse(
+          side == "bottom",
+          map_bottom - label_strip * 0.5,
+          map_top + label_strip * 0.5
+        ),
+        adj_x = 0.5,
+        adj_y = 0.5
+      )]
+
+      panels[, label_x := pmax(0.02 + label_width / 2, pmin(0.98 - label_width / 2, label_x))]
+      panels[, label_y := pmax(0.02 + label_height / 2, pmin(0.98 - label_height / 2, label_y))]
+
+      panels[, .(
+        region,
+        label_x,
+        label_y,
+        label_adj_x = adj_x,
+        label_adj_y = adj_y
+      )]
+    },
+
+    render_panel_labels = function(panels, cex = 0.75){
+      panels <- as.data.table(copy(panels))
+      if(nrow(panels) == 0){
+        return(invisible(NULL))
+      }
+
+      private$begin_ndc_overlay()
+      for(i in seq_len(nrow(panels))){
+        text(
+          x = panels$label_x[i],
+          y = panels$label_y[i],
+          labels = panels$region[i],
+          cex = cex,
+          adj = c(panels$label_adj_x[i], panels$label_adj_y[i]),
+          xpd = NA
+        )
+      }
+      invisible(NULL)
     }
   ),
 
@@ -939,7 +1840,7 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
     #' @param focalRegion \[NULL\] A character string naming one of the regions as it occurs in the region table, chosen as the focal region (from which lines showing inter-region overlap will emanate). If left NULL then a map will be plotted with each region as the focus in turn--this is best used after setting up a multi-panel plot with some variant of `par(mfrow=c(<number of rows>,<number of columns>))`.
     #' @param range_lon \[c(-179.0,179.0)\] Limit the map to some range of longitudes. Must be a vector of 2 numbers. For awkward reasons, using 180 or -180 can cause graphical bugs and I am deeply sorry.
     #' @param range_lat \[c(-85.0,85.0)\] Limit the map to some range of latitudes. Must be a vector of 2 numbers.
-    #' @param width_max \[15.0\] The maximum width of the circles/lines, in units of lat/lons. This width will correspond to the highest cluster count and the others will be scaled such that zero clusters <=> zero width.
+    #' @param width_max \[10.0\] The maximum width of the circles/lines, in units of lat/lons. This width will correspond to the highest cluster count and the others will be scaled such that zero clusters <=> zero width.
     #' @param alpha_max \[1.0\] As per width_max but controlling the alpha of connecting lines. Setting to NULL will disable alpha and make all lines solid. Can be set above 1.0, with weird results--probably don't do this.
     #' @param diversityCirclesFocalOnly \[FALSE\] Plot the circle representing a region's total/unique/shared diversity at only the focal region. Otherwise, all plots will show the diversities at all regions. This is good when you have multiple plots on the page, see description for `focalRegion`.
     #' @param projection \[EckertIV\] A function the performs projection of the map coordinates. Included in the package are `eckertIV`, `winkelIII`, and `equirectangular`. A custom function can be given--see details.
@@ -963,95 +1864,176 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
       curvature_matrix=NULL,
       mapData=mapData110
     ){
-      if(private$runflag==FALSE){
-        stop("Analysis has not been run. Perform using `$run()`")
+      state <- private$get_map_plot_state(run, width_max, alpha_max, curvature_matrix)
+      focalRegions <- if(is.null(focalRegion)){
+        state$regions
+      } else {
+        state$regions[state$regions %in% focalRegion]
       }
-      if(is.null(run) & length(private$results)>1){
-        stop("Please provide a run number to plot from (consider using `<ReMIXTURE Object>$plot_h_optimisation()`, `<ReMIXTURE Object>$plot_results_grid()`, and `<ReMIXTURE Object>$plot_clustercounts()` to assess which run parameters are appropriate).")
+      focalRegions <- private$validate_focal_regions(focalRegions, state$regions)
+
+      for(region_name in focalRegions){
+        private$render_map_panel(
+          state = state,
+          focalRegion = region_name,
+          range_lon = range_lon,
+          range_lat = range_lat,
+          projection = projection,
+          mapData = mapData,
+          overview = FALSE,
+          diversityCirclesFocalOnly = diversityCirclesFocalOnly,
+          returnAnchors = FALSE
+        )
       }
-      if(is.null(run) & length(private$results)==1){
-        run <- 1
+    },
+
+    #' @description
+    #' Plot a composite overview map with inset focal-region maps.
+    #'
+    #' @param run \[NULL\] If multiple runs were done, choose which run to use.
+    #' @param focalRegions \[NULL\] Character vector of focal regions to display. If NULL, regions whose overview anchors are visible inside the current central overview crop are used. If provided, the supplied regions are validated first; regions outside the current overview crop may be dropped according to the current validation path.
+    #' @param range_lon \[c(-179.0,179.0)\] Limit the map to some range of longitudes.
+    #' @param range_lat \[c(-85.0,85.0)\] Limit the map to some range of latitudes.
+    #' @param width_max \[10.0\] Maximum width of circles/lines.
+    #' @param alpha_max \[1.0\] Maximum alpha scaling for overlap curves.
+    #' @param projection \[EckertIV\] Projection function for the map coordinates.
+    #' @param curvature_matrix \[NULL\] Optional curvature matrix or `"random"`.
+    #' @param mapData \[mapData110\] Polygon data from which the map is made.
+    #' @param panels \[NULL\] Optional data.table/data.frame for manual reuse or editing of inset/card layout. Legacy `left/right/bottom/top` input is accepted and interpreted as the map rectangle. The full schema supports `region`, `side`, `card_left`, `card_right`, `card_bottom`, `card_top`, `map_left`, `map_right`, `map_bottom`, `map_top`, `label_x`, `label_y`, `label_adj_x`, `label_adj_y`, plus `left/right/bottom/top` aliases for `map_*`.
+    #' @param main_panel \[c(left = 0.28, right = 0.72, bottom = 0.30, top = 0.68)\] Normalized device coordinates for the central overview panel.
+    #' @param inset_width \[0.21\] Width of each inset panel in normalized device coordinates.
+    #' @param inset_height \[NULL\] Height of each inset panel in normalized device coordinates. If NULL, it will be estimated from the current map crop and device aspect ratio.
+    #' @param panel_aspect \[NULL\] Optional target width/height aspect ratio for inset panels. If NULL, a Tim-style bounded aspect based on the crop is used.
+    #' @param leader_lines \[TRUE\] If TRUE, draw dashed leader lines between inset panels and the overview anchors.
+    #' @param panel_labels \[TRUE\] If TRUE, draw panel labels outside the inset maps.
+    #' @param panel_label_cex \[0.75\] Text size for inset panel labels.
+    #' @param overview_circle_scale \[0.35\] Scale factor applied to diversity circles in the central overview map. This is a composite-only visual scaling parameter and does not affect analysis results or `plot_maps()`.
+    #' @param inset_circle_scale \[0.55\] Scale factor applied to diversity circles in inset maps. This is a composite-only visual scaling parameter and does not affect analysis results or `plot_maps()`.
+    #' @param inset_line_scale \[0.75\] Scale factor applied to overlap-curve widths in inset maps. This is a composite-only visual scaling parameter and does not affect analysis results or `plot_maps()`.
+    #'
+    #' @details
+    #' The method draws a slot-based composite figure around a central overview map. Large `inset_width` values require sufficient horizontal space around `main_panel`. For auto-generated layouts, impossible side geometry fails with a clear error instead of drawing an overlapping figure. For user-supplied `panels`, potentially overlapping layouts are warned about rather than automatically modified.
+    #'
+    #' Before using this method for final interpretation, users are encouraged to inspect H behaviour with the existing ReMIXTURE diagnostic tools, such as `plot_h_optimisation()`, `plot_results_grid()`, and `plot_distance_densities()`, then pass a selected run to `plot_maps_composite()`.
+    #' A typical workflow is `rm$run(...)`, `rm$plot_h_optimisation()`, `rm$plot_results_grid()`, `rm$plot_distance_densities(HdistFromRun = selected_run)`, and finally `rm$plot_maps_composite(run = selected_run)`.
+    #'
+    #' The returned layout uses a full card/map/label schema so it can be edited and passed back through `panels` for publication-style manual refinement.
+    #'
+    #' @return Invisibly returns a `data.table` describing the composite panel layout. The returned table can be edited and passed back through `panels` to manually fine-tune publication figures. It includes at least `region`, `side`, `card_left`, `card_right`, `card_bottom`, `card_top`, `map_left`, `map_right`, `map_bottom`, `map_top`, `label_x`, `label_y`, `label_adj_x`, `label_adj_y`, plus `left/right/bottom/top` aliases equal to `map_*`.
+    plot_maps_composite = function(
+      run = NULL,
+      focalRegions = NULL,
+      range_lon = c(-179.0, 179.0),
+      range_lat = c(-85.0, 85.0),
+      width_max = 10.0,
+      alpha_max = 1.0,
+      projection = eckertIV,
+      curvature_matrix = NULL,
+      mapData = mapData110,
+      panels = NULL,
+      main_panel = c(left = 0.28, right = 0.72, bottom = 0.30, top = 0.68),
+      inset_width = 0.21,
+      inset_height = NULL,
+      panel_aspect = NULL,
+      leader_lines = TRUE,
+      panel_labels = TRUE,
+      panel_label_cex = 0.75,
+      overview_circle_scale = 0.35,
+      inset_circle_scale = 0.55,
+      inset_line_scale = 0.75
+    ){
+      state <- private$get_map_plot_state(run, width_max, alpha_max, curvature_matrix)
+      main_panel <- private$normalize_main_panel(main_panel)
+
+      op <- par(no.readonly = TRUE)
+      on.exit(par(op), add = TRUE)
+
+      plot.new()
+      par(fig = unname(main_panel[c("left", "right", "bottom", "top")]), mar = c(0.2, 0.2, 1, 0.2), new = TRUE, xpd = FALSE)
+      anchors <- private$render_map_panel(
+        state = state,
+        focalRegion = focalRegions[1],
+        range_lon = range_lon,
+        range_lat = range_lat,
+        projection = projection,
+        mapData = mapData,
+        overview = TRUE,
+        diversityCirclesFocalOnly = FALSE,
+        returnAnchors = TRUE,
+        circle_scale = overview_circle_scale,
+        clip_to_panel = TRUE,
+        border_last = TRUE,
+        tight_axes = TRUE,
+        draw_grid = FALSE
+      )
+      visible_anchors <- private$filter_visible_anchors(anchors, main_panel)
+
+      focalRegions <- if(is.null(focalRegions)){
+        visible_anchors$region
+      } else {
+        focalRegions <- private$validate_focal_regions(focalRegions, state$regions)
+        dropped_regions <- setdiff(focalRegions, visible_anchors$region)
+        if(length(dropped_regions) > 0){
+          warning(
+            "Dropping focal regions outside the current overview crop: ",
+            paste(dropped_regions, collapse = ", ")
+          )
+        }
+        focalRegions[focalRegions %in% visible_anchors$region]
+      }
+      if(length(focalRegions) == 0){
+        stop("No focal regions are visible within the current `range_lon` / `range_lat`. Expand the crop or explicitly choose visible regions.")
       }
 
-      st <- private$results[[run]]$overlap
-      rt <- data.table(
-        region=colnames(st),
-        totDiv=private$results[[run]]$diversity
+      visible_anchors <- visible_anchors[match(focalRegions, region)]
+      inset_height <- private$compute_inset_height(
+        inset_width = inset_width,
+        inset_height = inset_height,
+        range_lon = range_lon,
+        range_lat = range_lat,
+        panel_aspect = panel_aspect
       )
 
-      rt[,uniqueDiv:=private$results[[run]]$overlap[r,r],by=.(r=region)] # could just pull out diagonal but this seems safer
-      rt <- private$rt[rt,on=.(region)]
-      width_scaling <- compute_plot_width_scaling(
-        totDiv = rt$totDiv,
-        uniqueDiv = rt$uniqueDiv,
-        overlap = st,
-        width_max = width_max
-      )
-      rt[,wTotDiv := width_scaling$wTotDiv]
-      rt[,wUniqueDiv := width_scaling$wUniqueDiv]
-      wst <- width_scaling$wst
-
-      ct <- if(is.null(curvature_matrix)){
-        matrix(0.0,ncol=nrow(rt),nrow=nrow(rt),dimnames=list(rt$region,rt$region))
-      } else if (curvature_matrix[1]=="random") {
-        cm <- matrix(rnorm(nrow(private$rt)**2,0,0.3),nrow=nrow(private$rt))
-        rownames(cm) <- colnames(cm) <- private$rt$region
-        cm
+      panels <- if(is.null(panels)){
+        private$make_composite_layout(visible_anchors, focalRegions, main_panel, inset_width, inset_height)
       } else {
-        curvature_matrix
-      }
-      at <- copy(st)
-      diag(at) <- 0.0
-      if(is.null(alpha_max)){
-        at[,] <- 1.0
-      } else {
-        maxAlphaSource <- suppressWarnings(max(at, na.rm = TRUE))
-        if(!is.finite(maxAlphaSource) || maxAlphaSource <= 0){
-          at[,] <- 0.0
-        } else {
-          at[,] <- at/maxAlphaSource*alpha_max
-        }
-      }
-      plotMiddle <- findCentreLL(range_lon,range_lat)
-      trt <- copy(rt) %>% rotateLatLonDtLL(-plotMiddle[1],-plotMiddle[2],splitPlotGrps=F)
-      rIdxList <- if(!is.null(focalRegion)){
-        which(rt$region %in% focalRegion)
-      } else {
-        1:nrow(trt)
+        private$validate_composite_layout(panels, focalRegions, main_panel)
       }
 
-      for(i in rIdxList){
-        #i <- 1
-        pe <- plotEmptyMap( range_lon, range_lat, projFun=projection )
-        #plotMapItem( makeBorder() , range_lon , range_lat, projFun=projection , plotFun=lines,   col="#00000022" , lwd=.4 )
-        plotMapItem( makeMapDataLatLonLines() , range_lon , range_lat, projFun=projection , plotFun=lines,   col="#00000022" , lwd=.4 )
-        plotMapItem( mapData                  , range_lon , range_lat, projFun=projection , plotFun=polygon, col="#f7bf25" , lwd=0.2 )
-        plotMapBorder(                          range_lon , range_lat, projFun=projection , plotEdges=pe ,lwd=4 )
-
-        for(j in 1:nrow(trt)){
-          #j <- 3
-          if(i==j){next}
-          ldt <- curved_rounded_line(
-            x1=trt$lon[i],y1 = trt$lat[i],
-            x2=trt$lon[j],y2 = trt$lat[j],
-            width =     wst[trt$region[i],trt$region[j]],
-            curvature = ct[trt$region[i],trt$region[j]]
-          ) %>% mat2dtLL()
-          plotMapItem(ldt,projFun=projection,plotFun=polygon,col=alpha("black",at[trt$region[i],trt$region[j]]),border="#000000",lwd=0.15)
-          if(diversityCirclesFocalOnly==FALSE){
-            cdt <- circle_seg(trt[j]$lon,trt[j]$lat,radius=trt$wTotDiv[j]/2   ) %>% mat2dtLL()
-            udt <- circle_seg(trt[j]$lon,trt[j]$lat,radius=trt$wUniqueDiv[j]/2) %>% mat2dtLL()
-            plotMapItem(cdt,projFun=projection,plotFun=polygon,col="#00000055") # 'shadow' effect
-            plotMapItem(cdt,projFun=projection,plotFun=polygon,col="#000000FF")
-            plotMapItem(udt,projFun=projection,plotFun=polygon,col="#FFFFFF")
-          }
-        }
-        cdt <- circle_seg(trt[i]$lon,trt[i]$lat,radius=trt$wTotDiv[i]/2   ) %>% mat2dtLL()
-        udt <- circle_seg(trt[i]$lon,trt[i]$lat,radius=trt$wUniqueDiv[i]/2) %>% mat2dtLL()
-        plotMapItem(cdt,projFun=projection,plotFun=polygon,col="#000000FF")
-        plotMapItem(udt,projFun=projection,plotFun=polygon,col="#FFFFFF")
-        title(main=trt$region[i])
+      leader_segments <- private$make_leader_segments(panels, visible_anchors)
+      if(leader_lines){
+        private$render_leader_segments(leader_segments)
       }
+
+      panel_regions <- panels$region
+      for(i in seq_len(nrow(panels))){
+        par(fig = c(panels$map_left[i], panels$map_right[i], panels$map_bottom[i], panels$map_top[i]), mar = c(0.2, 0.2, 1, 0.2), new = TRUE, xpd = FALSE)
+        private$render_map_panel(
+          state = state,
+          focalRegion = panels$region[i],
+          range_lon = range_lon,
+          range_lat = range_lat,
+          projection = projection,
+          mapData = mapData,
+          overview = FALSE,
+          diversityCirclesFocalOnly = TRUE,
+          returnAnchors = FALSE,
+          circle_scale = inset_circle_scale,
+          line_scale = inset_line_scale,
+          targetRegions = panel_regions,
+          clip_to_panel = TRUE,
+          border_last = TRUE,
+          tight_axes = TRUE,
+          draw_grid = FALSE,
+          draw_title = FALSE
+        )
+      }
+
+      if(panel_labels){
+        private$render_panel_labels(panels, cex = panel_label_cex)
+      }
+
+      invisible(panels)
     },
     #' @description
     #' Plot inter-sample distances as a density plot over the distance matrix--basically, a convenient way to judge how far apart samples tend to be, and thus how the clustering might behave when various H values (\eqn{H}) are used.

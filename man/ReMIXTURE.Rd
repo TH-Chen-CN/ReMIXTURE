@@ -155,6 +155,7 @@ rm$run(
 \item \href{#method-ReMIXTURE-plot_clustercounts}{\code{ReMIXTURE$plot_clustercounts()}}
 \item \href{#method-ReMIXTURE-plot_h_optimisation}{\code{ReMIXTURE$plot_h_optimisation()}}
 \item \href{#method-ReMIXTURE-plot_maps}{\code{ReMIXTURE$plot_maps()}}
+\item \href{#method-ReMIXTURE-plot_maps_composite}{\code{ReMIXTURE$plot_maps_composite()}}
 \item \href{#method-ReMIXTURE-plot_distance_densities}{\code{ReMIXTURE$plot_distance_densities()}}
 \item \href{#method-ReMIXTURE-plot_MDS}{\code{ReMIXTURE$plot_MDS()}}
 \item \href{#method-ReMIXTURE-clone}{\code{ReMIXTURE$clone()}}
@@ -342,7 +343,7 @@ Produces the canonical ReMIXTURE plots.
 
 \item{\code{range_lat}}{[c(-85.0,85.0)] Limit the map to some range of latitudes. Must be a vector of 2 numbers.}
 
-\item{\code{width_max}}{[15.0] The maximum width of the circles/lines, in units of lat/lons. This width will correspond to the highest cluster count and the others will be scaled such that zero clusters <=> zero width.}
+\item{\code{width_max}}{[10.0] The maximum width of the circles/lines, in units of lat/lons. This width will correspond to the highest cluster count and the others will be scaled such that zero clusters <=> zero width.}
 
 \item{\code{alpha_max}}{[1.0] As per width_max but controlling the alpha of connecting lines. Setting to NULL will disable alpha and make all lines solid. Can be set above 1.0, with weird results--probably don't do this.}
 
@@ -362,6 +363,94 @@ A custom projection function should follow these rules: its first argument, name
 
 \subsection{Returns}{
 Nothing
+}
+}
+\if{html}{\out{<hr>}}
+\if{html}{\out{<a id="method-ReMIXTURE-plot_maps_composite"></a>}}
+\if{latex}{\out{\hypertarget{method-ReMIXTURE-plot_maps_composite}{}}}
+\subsection{Method \code{plot_maps_composite()}}{
+Plot a composite overview map with inset focal-region maps.
+\subsection{Usage}{
+\if{html}{\out{<div class="r">}}\preformatted{ReMIXTURE$plot_maps_composite(
+  run = NULL,
+  focalRegions = NULL,
+  range_lon = c(-179, 179),
+  range_lat = c(-85, 85),
+  width_max = 10,
+  alpha_max = 1,
+  projection = eckertIV,
+  curvature_matrix = NULL,
+  mapData = mapData110,
+  panels = NULL,
+  main_panel = c(left = 0.28, right = 0.72, bottom = 0.3, top = 0.68),
+  inset_width = 0.21,
+  inset_height = NULL,
+  panel_aspect = NULL,
+  leader_lines = TRUE,
+  panel_labels = TRUE,
+  panel_label_cex = 0.75,
+  overview_circle_scale = 0.35,
+  inset_circle_scale = 0.55,
+  inset_line_scale = 0.75
+)}\if{html}{\out{</div>}}
+}
+
+\subsection{Arguments}{
+\if{html}{\out{<div class="arguments">}}
+\describe{
+\item{\code{run}}{[NULL] If multiple runs were done, choose which run to use.}
+
+\item{\code{focalRegions}}{[NULL] Character vector of focal regions to display. If NULL, regions whose overview anchors are visible inside the current central overview crop are used. If provided, the supplied regions are validated first; regions outside the current overview crop may be dropped according to the current validation path.}
+
+\item{\code{range_lon}}{[c(-179.0,179.0)] Limit the map to some range of longitudes.}
+
+\item{\code{range_lat}}{[c(-85.0,85.0)] Limit the map to some range of latitudes.}
+
+\item{\code{width_max}}{[10.0] Maximum width of circles/lines.}
+
+\item{\code{alpha_max}}{[1.0] Maximum alpha scaling for overlap curves.}
+
+\item{\code{projection}}{[EckertIV] Projection function for the map coordinates.}
+
+\item{\code{curvature_matrix}}{[NULL] Optional curvature matrix or \code{"random"}.}
+
+\item{\code{mapData}}{[mapData110] Polygon data from which the map is made.}
+
+\item{\code{panels}}{[NULL] Optional data.table/data.frame for manual reuse or editing of inset/card layout. Legacy \code{left/right/bottom/top} input is accepted and interpreted as the map rectangle. The full schema supports \code{region}, \code{side}, \code{card_left}, \code{card_right}, \code{card_bottom}, \code{card_top}, \code{map_left}, \code{map_right}, \code{map_bottom}, \code{map_top}, \code{label_x}, \code{label_y}, \code{label_adj_x}, \code{label_adj_y}, plus \code{left/right/bottom/top} aliases for \verb{map_*}.}
+
+\item{\code{main_panel}}{[c(left = 0.28, right = 0.72, bottom = 0.30, top = 0.68)] Normalized device coordinates for the central overview panel.}
+
+\item{\code{inset_width}}{[0.21] Width of each inset panel in normalized device coordinates.}
+
+\item{\code{inset_height}}{[NULL] Height of each inset panel in normalized device coordinates. If NULL, it will be estimated from the current map crop and device aspect ratio.}
+
+\item{\code{panel_aspect}}{[NULL] Optional target width/height aspect ratio for inset panels. If NULL, a Tim-style bounded aspect based on the crop is used.}
+
+\item{\code{leader_lines}}{[TRUE] If TRUE, draw dashed leader lines between inset panels and the overview anchors.}
+
+\item{\code{panel_labels}}{[TRUE] If TRUE, draw panel labels outside the inset maps.}
+
+\item{\code{panel_label_cex}}{[0.75] Text size for inset panel labels.}
+
+\item{\code{overview_circle_scale}}{[0.35] Scale factor applied to diversity circles in the central overview map. This is a composite-only visual scaling parameter and does not affect analysis results or \code{plot_maps()}.}
+
+\item{\code{inset_circle_scale}}{[0.55] Scale factor applied to diversity circles in inset maps. This is a composite-only visual scaling parameter and does not affect analysis results or \code{plot_maps()}.}
+
+\item{\code{inset_line_scale}}{[0.75] Scale factor applied to overlap-curve widths in inset maps. This is a composite-only visual scaling parameter and does not affect analysis results or \code{plot_maps()}.}
+}
+\if{html}{\out{</div>}}
+}
+\subsection{Details}{
+The method draws a slot-based composite figure around a central overview map. Large \code{inset_width} values require sufficient horizontal space around \code{main_panel}. For auto-generated layouts, impossible side geometry fails with a clear error instead of drawing an overlapping figure. For user-supplied \code{panels}, potentially overlapping layouts are warned about rather than automatically modified.
+
+Before using this method for final interpretation, users are encouraged to inspect H behaviour with the existing ReMIXTURE diagnostic tools, such as \code{plot_h_optimisation()}, \code{plot_results_grid()}, and \code{plot_distance_densities()}, then pass a selected run to \code{plot_maps_composite()}.
+A typical workflow is \code{rm$run(...)}, \code{rm$plot_h_optimisation()}, \code{rm$plot_results_grid()}, \code{rm$plot_distance_densities(HdistFromRun = selected_run)}, and finally \code{rm$plot_maps_composite(run = selected_run)}.
+
+The returned layout uses a full card/map/label schema so it can be edited and passed back through \code{panels} for publication-style manual refinement.
+}
+
+\subsection{Returns}{
+Invisibly returns a \code{data.table} describing the composite panel layout. The returned table can be edited and passed back through \code{panels} to manually fine-tune publication figures. It includes at least \code{region}, \code{side}, \code{card_left}, \code{card_right}, \code{card_bottom}, \code{card_top}, \code{map_left}, \code{map_right}, \code{map_bottom}, \code{map_top}, \code{label_x}, \code{label_y}, \code{label_adj_x}, \code{label_adj_y}, plus \code{left/right/bottom/top} aliases equal to \verb{map_*}.
 }
 }
 \if{html}{\out{<hr>}}

@@ -182,7 +182,7 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
         stop("Self-distance (i.e. distance matrix diagonals) should all be zero")
       }
       if ( !all(in_dm[upper.tri(in_dm)]==t(in_dm)[upper.tri(in_dm)]) ){
-        stop("Distance matrix must be diagonal.")
+        stop("Distance matrix must be symmetric.")
       }
       if(!all(in_dm>=0)){
         stop("All distance matrix entries must be positive")
@@ -259,7 +259,6 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
       invalid <- !isBehaved(dm)
       #diag(invalid) <- FALSE
       drop_any_invalid <- apply(invalid, 1, any)
-      drop_all_invalid[1:10]
       if(any(drop_any_invalid)){
         dm <- dm[!drop_any_invalid, !drop_any_invalid, drop = FALSE]
       }
@@ -604,7 +603,8 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
       }
       device <- par("din")
       computed_height <- inset_width * device[1] / (target_aspect * device[2])
-      computed_height <- max(0.10, min(0.22, computed_height))
+      # Keep automatic inset maps from collapsing into very flat strips on wide devices.
+      computed_height <- max(0.13, min(0.24, computed_height))
 
       computed_height
     },
@@ -646,10 +646,39 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
       draw_grid = TRUE,
       draw_title = TRUE,
       title_cex = NULL,
-      title_line = NULL
+      title_line = NULL,
+      inset_style = "default"
     ){
       plotMiddle <- findCentreLL(range_lon, range_lat)
       trt <- copy(state$rt) %>% rotateLatLonDtLL(-plotMiddle[1], -plotMiddle[2], splitPlotGrps = FALSE)
+      use_line_emphasis <- !overview && identical(inset_style, "line_emphasis")
+      effective_circle_scale <- if(use_line_emphasis) circle_scale * 0.35 else circle_scale
+      effective_line_scale <- if(use_line_emphasis) line_scale * 1.8 else line_scale
+      draw_focal_circle_last <- TRUE
+      curved_line_path <- function(x1, y1, x2, y2, curvature = 0, n = 200){
+        if(curvature == 0){
+          return(filled_line(x1, y1, x2, y2, n = n))
+        }
+        if(!(curvature > -pi & curvature < pi)){
+          stop("Curvatures must be in [-pi,+pi]")
+        }
+        reflectX <- sign(curvature) == 1
+        curvature <- abs(curvature)
+        l <- euc_dist(x1, y1, x2, y2)
+        x_c <- (l / 2) / tan(curvature)
+        h_c <- (l / 2) / sin(pi - curvature)
+        circle_seg(
+          x_c,
+          l / 2,
+          h_c,
+          (pi * (3 / 2)) - curvature,
+          (pi * (3 / 2)) + curvature,
+          n = n
+        ) %>%
+          reflect(about_x = reflectX, about_y = FALSE) %>%
+          rotate(angle(x1, y1, x2, y2)) %>%
+          translate(by_x = x1, by_y = y1)
+      }
 
       pe <- plotEmptyMap(
         range_lon,
@@ -692,28 +721,55 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
       targetRegions <- targetRegions[targetRegions %in% trt$region]
       targetIdx <- which(trt$region %in% targetRegions)
 
+      if(use_line_emphasis){
+        private$draw_region_diversity_circle(trt, i, projection, shadow = FALSE, circle_scale = effective_circle_scale)
+        draw_focal_circle_last <- FALSE
+      }
+
       for(j in targetIdx){
         if(i == j){ next }
-        ldt <- curved_rounded_line(
-          x1 = trt$lon[i], y1 = trt$lat[i],
-          x2 = trt$lon[j], y2 = trt$lat[j],
-          width = state$wst[trt$region[i], trt$region[j]] * line_scale,
-          curvature = state$ct[trt$region[i], trt$region[j]]
-        ) %>% mat2dtLL()
-        plotMapItem(
-          ldt,
-          projFun = projection,
-          plotFun = polygon,
-          col = alpha("black", state$at[trt$region[i], trt$region[j]]),
-          border = "#000000",
-          lwd = 0.15
-        )
+        raw_curve_width <- state$wst[trt$region[i], trt$region[j]] * effective_line_scale
+        if(use_line_emphasis){
+          if(!is.finite(raw_curve_width) || raw_curve_width <= 0){
+            next
+          }
+          ldt <- curved_line_path(
+            x1 = trt$lon[i], y1 = trt$lat[i],
+            x2 = trt$lon[j], y2 = trt$lat[j],
+            curvature = state$ct[trt$region[i], trt$region[j]]
+          ) %>% mat2dtLL()
+          plotMapItem(
+            ldt,
+            projFun = projection,
+            plotFun = lines,
+            col = "grey20",
+            lty = 1,
+            lwd = pmax(raw_curve_width * 2, 0.65)
+          )
+        } else {
+          ldt <- curved_rounded_line(
+            x1 = trt$lon[i], y1 = trt$lat[i],
+            x2 = trt$lon[j], y2 = trt$lat[j],
+            width = raw_curve_width,
+            curvature = state$ct[trt$region[i], trt$region[j]]
+          ) %>% mat2dtLL()
+          plotMapItem(
+            ldt,
+            projFun = projection,
+            plotFun = polygon,
+            col = alpha("black", state$at[trt$region[i], trt$region[j]]),
+            border = "#000000",
+            lwd = 0.15
+          )
+        }
         if(diversityCirclesFocalOnly == FALSE){
-          private$draw_region_diversity_circle(trt, j, projection, shadow = TRUE, circle_scale = circle_scale)
+          private$draw_region_diversity_circle(trt, j, projection, shadow = TRUE, circle_scale = effective_circle_scale)
         }
       }
 
-      private$draw_region_diversity_circle(trt, i, projection, shadow = FALSE, circle_scale = circle_scale)
+      if(draw_focal_circle_last){
+        private$draw_region_diversity_circle(trt, i, projection, shadow = FALSE, circle_scale = effective_circle_scale)
+      }
       if(border_last){
         plotMapBorder(range_lon, range_lat, projFun = projection, plotEdges = pe, lwd = 4)
       }
@@ -1025,6 +1081,171 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
       panels[match(focalRegions, region)][]
     },
 
+    make_ellipse_layout = function(visible_anchors, focalRegions, main_panel, inset_width, inset_height){
+      main_panel <- private$normalize_main_panel(main_panel)
+      anchors <- as.data.table(copy(visible_anchors))
+      anchors <- anchors[region %in% focalRegions]
+      if(nrow(anchors) != length(focalRegions)){
+        stop("Anchors are missing for one or more focal regions.")
+      }
+      anchors <- anchors[match(focalRegions, region)]
+
+      cx <- mean(c(main_panel["left"], main_panel["right"]))
+      cy <- mean(c(main_panel["bottom"], main_panel["top"]))
+      main_w <- main_panel["right"] - main_panel["left"]
+      main_h <- main_panel["top"] - main_panel["bottom"]
+      main_half_w <- main_w / 2
+      main_half_h <- main_h / 2
+      panel_half_w <- inset_width / 2
+      panel_half_h <- inset_height / 2
+
+      outer_margin <- 0.03
+      label_strip <- 0.025
+      subPlotMult <- max(inset_width / main_w, inset_height / main_h)
+      unitCircStretch <- sqrt(2) + sqrt((subPlotMult / 2)^2 + (subPlotMult / 2)^2)
+      distAdjFactor <- 1.0
+      n <- nrow(anchors)
+
+      norm_angle <- function(x){
+        x %% (2 * pi)
+      }
+      angle_dist <- function(a, b){
+        abs(atan2(sin(a - b), cos(a - b)))
+      }
+
+      candidate_base <- seq(0, 2 * pi * (n - 1) / n, length.out = n)
+      fallback_thetas <- candidate_base
+
+      anchor_theta <- atan2(
+        (anchors$y - cy) / main_half_h,
+        (anchors$x - cx) / main_half_w
+      )
+      anchor_theta <- norm_angle(anchor_theta)
+      near_centre <- abs((anchors$x - cx) / main_half_w) < 1e-8 &
+        abs((anchors$y - cy) / main_half_h) < 1e-8
+      if(any(near_centre)){
+        anchor_theta[near_centre] <- fallback_thetas[which(near_centre)]
+      }
+
+      anchor_order <- order(anchor_theta, anchors$region)
+      anchor_theta_sorted <- anchor_theta[anchor_order]
+      anchors_sorted <- anchors[anchor_order]
+
+      offset_candidates <- anchor_theta_sorted - candidate_base
+      best_score <- Inf
+      best_offset <- offset_candidates[1]
+      best_candidate_theta <- NULL
+      best_candidate_order <- NULL
+
+      for(offset in offset_candidates){
+        candidate_theta <- norm_angle(candidate_base + offset)
+        candidate_order <- order(candidate_theta)
+        score <- sum(angle_dist(anchor_theta_sorted, candidate_theta[candidate_order]))
+        if(score < best_score){
+          best_score <- score
+          best_offset <- offset
+          best_candidate_theta <- candidate_theta
+          best_candidate_order <- candidate_order
+        }
+      }
+
+      assigned_theta <- best_candidate_theta[best_candidate_order]
+      px <- cx + main_half_w * unitCircStretch * distAdjFactor * cos(assigned_theta)
+      py <- cy + main_half_h * unitCircStretch * distAdjFactor * sin(assigned_theta)
+
+      out <- copy(anchors_sorted)[, `:=`(
+        .region_order = match(region, focalRegions),
+        .theta = assigned_theta,
+        .px = px,
+        .py = py
+      )]
+
+      out[, `:=`(
+        map_left = .px - panel_half_w,
+        map_right = .px + panel_half_w,
+        map_bottom = .py - panel_half_h,
+        map_top = .py + panel_half_h
+      )]
+
+      out[, side := fifelse(
+        abs(.px - cx) >= abs(.py - cy),
+        fifelse(.px >= cx, "right", "left"),
+        fifelse(.py >= cy, "top", "bottom")
+      )]
+
+      out[, `:=`(
+        card_left = map_left,
+        card_right = map_right,
+        card_bottom = fifelse(side == "bottom", map_bottom - label_strip, map_bottom),
+        card_top = fifelse(side == "bottom", map_top, map_top + label_strip)
+      )]
+
+      outside_idx <- which(
+        out$map_left < 0 | out$map_right > 1 |
+          out$map_bottom < 0 | out$map_top > 1 |
+          out$card_left < 0 | out$card_right > 1 |
+          out$card_bottom < 0 | out$card_top > 1
+      )
+      if(length(outside_idx) > 0){
+        stop(
+          "Ellipse layout could not place region `", out$region[outside_idx[1]],
+          "` inside the device. Reduce `inset_width`, reduce `inset_height`, adjust `main_panel`, or use `layout = \"slot\"`."
+        )
+      }
+
+      for(i in seq_len(nrow(out))){
+        if(private$rectangles_overlap(
+          out$map_left[i], out$map_right[i], out$map_bottom[i], out$map_top[i],
+          main_panel["left"], main_panel["right"], main_panel["bottom"], main_panel["top"]
+        )){
+          stop(
+            "Ellipse layout overlaps the central overview for region `", out$region[i],
+            "`. Reduce `inset_width`, reduce `inset_height`, adjust `main_panel`, or use `layout = \"slot\"`."
+          )
+        }
+      }
+
+      out <- out[, .(
+        region,
+        side,
+        card_left,
+        card_right,
+        card_bottom,
+        card_top,
+        map_left,
+        map_right,
+        map_bottom,
+        map_top
+      )]
+      labels <- private$compute_panel_label_positions(out)
+      out <- labels[out, on = .(region)]
+      out[, `:=`(
+        left = map_left,
+        right = map_right,
+        bottom = map_bottom,
+        top = map_top
+      )]
+
+      if(nrow(out) > 1){
+        for(i in seq_len(nrow(out) - 1)){
+          for(j in (i + 1):nrow(out)){
+            if(private$rectangles_overlap(
+              out$card_left[i], out$card_right[i], out$card_bottom[i], out$card_top[i],
+              out$card_left[j], out$card_right[j], out$card_bottom[j], out$card_top[j]
+            )){
+              stop(
+                "Ellipse layout produced overlapping panels: ",
+                out$region[i], " and ", out$region[j],
+                ". Try fewer `focalRegions`, smaller `inset_width`, or `layout = \"slot\"`."
+              )
+            }
+          }
+        }
+      }
+
+      out[match(focalRegions, region)][]
+    },
+
     validate_composite_layout = function(panels, focalRegions, main_panel){
       if(!(is.data.frame(panels) || data.table::is.data.table(panels))){
         stop("`panels` must be a data.frame or data.table.")
@@ -1113,8 +1334,10 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
 
       left_capacity <- unname(main_panel["left"] - gap - outer_margin)
       right_capacity <- unname(1 - outer_margin - main_panel["right"] - gap)
-      left_width_excess <- panels[side == "left", max(map_right - map_left, na.rm = TRUE)] > left_capacity
-      right_width_excess <- panels[side == "right", max(map_right - map_left, na.rm = TRUE)] > right_capacity
+      left_width_excess <- panels[side == "left", .N] > 0 &&
+        panels[side == "left", max(map_right - map_left, na.rm = TRUE)] > left_capacity
+      right_width_excess <- panels[side == "right", .N] > 0 &&
+        panels[side == "right", max(map_right - map_left, na.rm = TRUE)] > right_capacity
       if(isTRUE(left_width_excess) || isTRUE(right_width_excess)){
         warning(
           paste0(
@@ -1222,9 +1445,7 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
 
     compute_panel_label_positions = function(
       panels,
-      panel_label_cex = 0.75,
-      label_gap = 0.014,
-      min_label_gap = 0.008
+      panel_label_cex = 0.75
     ){
       panels <- as.data.table(copy(panels))
       if(nrow(panels) == 0){
@@ -1900,9 +2121,10 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
     #' @param curvature_matrix \[NULL\] Optional curvature matrix or `"random"`.
     #' @param mapData \[mapData110\] Polygon data from which the map is made.
     #' @param panels \[NULL\] Optional data.table/data.frame for manual reuse or editing of inset/card layout. Legacy `left/right/bottom/top` input is accepted and interpreted as the map rectangle. The full schema supports `region`, `side`, `card_left`, `card_right`, `card_bottom`, `card_top`, `map_left`, `map_right`, `map_bottom`, `map_top`, `label_x`, `label_y`, `label_adj_x`, `label_adj_y`, plus `left/right/bottom/top` aliases for `map_*`.
+    #' @param layout \[`"slot"`\] Layout engine for automatic inset placement. `"slot"` is the default stable layout. `"ellipse"` is an experimental squashed-circle layout that places evenly spaced inset panels around the central map and uses overview-anchor angles to assign regions to those positions.
     #' @param main_panel \[c(left = 0.28, right = 0.72, bottom = 0.30, top = 0.68)\] Normalized device coordinates for the central overview panel.
-    #' @param inset_width \[0.21\] Width of each inset panel in normalized device coordinates.
-    #' @param inset_height \[NULL\] Height of each inset panel in normalized device coordinates. If NULL, it will be estimated from the current map crop and device aspect ratio.
+    #' @param inset_width \[0.18\] Width of each inset panel in normalized device coordinates.
+    #' @param inset_height \[NULL\] Height of each inset panel in normalized device coordinates. If NULL, it will be estimated from the current map crop and device aspect ratio. Very small explicit values can visually flatten inset maps on wide devices; publication figures can set this manually or edit the returned `panels`.
     #' @param panel_aspect \[NULL\] Optional target width/height aspect ratio for inset panels. If NULL, a Tim-style bounded aspect based on the crop is used.
     #' @param leader_lines \[TRUE\] If TRUE, draw dashed leader lines between inset panels and the overview anchors.
     #' @param panel_labels \[TRUE\] If TRUE, draw panel labels outside the inset maps.
@@ -1910,12 +2132,18 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
     #' @param overview_circle_scale \[0.35\] Scale factor applied to diversity circles in the central overview map. This is a composite-only visual scaling parameter and does not affect analysis results or `plot_maps()`.
     #' @param inset_circle_scale \[0.55\] Scale factor applied to diversity circles in inset maps. This is a composite-only visual scaling parameter and does not affect analysis results or `plot_maps()`.
     #' @param inset_line_scale \[0.75\] Scale factor applied to overlap-curve widths in inset maps. This is a composite-only visual scaling parameter and does not affect analysis results or `plot_maps()`.
+    #' @param inset_style \[`"default"`\] Controls visual emphasis for inset panels. `"default"` uses the standard map rendering. `"line_emphasis"` reduces the visual dominance of inset circles and emphasises overlap curves; this is useful when inset panels are small.
     #'
     #' @details
     #' The method draws a slot-based composite figure around a central overview map. Large `inset_width` values require sufficient horizontal space around `main_panel`. For auto-generated layouts, impossible side geometry fails with a clear error instead of drawing an overlapping figure. For user-supplied `panels`, potentially overlapping layouts are warned about rather than automatically modified.
+    #' When `focalRegions = NULL`, all visible overview anchors are used. If many regions are visible, the automatic layout may fail clearly rather than drawing overlapping panels; users can pass fewer `focalRegions`, reduce `inset_width`, adjust `main_panel`, or edit the returned `panels`.
     #'
     #' Before using this method for final interpretation, users are encouraged to inspect H behaviour with the existing ReMIXTURE diagnostic tools, such as `plot_h_optimisation()`, `plot_results_grid()`, and `plot_distance_densities()`, then pass a selected run to `plot_maps_composite()`.
     #' A typical workflow is `rm$run(...)`, `rm$plot_h_optimisation()`, `rm$plot_results_grid()`, `rm$plot_distance_densities(HdistFromRun = selected_run)`, and finally `rm$plot_maps_composite(run = selected_run)`.
+    #'
+    #' The overview map keeps the full circle-based visual encoding. The `"line_emphasis"` inset style is intended for publication-style composite figures where inset maps should highlight overlap curves more than node circles.
+    #'
+    #' When `panels` is left NULL, `layout = "slot"` uses the default slot-based layout and `layout = "ellipse"` uses an experimental ellipse layout. The returned panels can be edited and passed back manually through `panels`.
     #'
     #' The returned layout uses a full card/map/label schema so it can be edited and passed back through `panels` for publication-style manual refinement.
     #'
@@ -1931,8 +2159,9 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
       curvature_matrix = NULL,
       mapData = mapData110,
       panels = NULL,
+      layout = c("slot", "ellipse"),
       main_panel = c(left = 0.28, right = 0.72, bottom = 0.30, top = 0.68),
-      inset_width = 0.21,
+      inset_width = 0.18,
       inset_height = NULL,
       panel_aspect = NULL,
       leader_lines = TRUE,
@@ -1940,10 +2169,13 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
       panel_label_cex = 0.75,
       overview_circle_scale = 0.35,
       inset_circle_scale = 0.55,
-      inset_line_scale = 0.75
+      inset_line_scale = 0.75,
+      inset_style = c("default", "line_emphasis")
     ){
       state <- private$get_map_plot_state(run, width_max, alpha_max, curvature_matrix)
       main_panel <- private$normalize_main_panel(main_panel)
+      layout <- match.arg(layout)
+      inset_style <- match.arg(inset_style)
 
       op <- par(no.readonly = TRUE)
       on.exit(par(op), add = TRUE)
@@ -1967,6 +2199,13 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
         draw_grid = FALSE
       )
       visible_anchors <- private$filter_visible_anchors(anchors, main_panel)
+
+      if(!is.null(panels) && is.null(focalRegions)){
+        if(!(is.data.frame(panels) || data.table::is.data.table(panels)) || !"region" %in% colnames(panels)){
+          stop("When `panels` is supplied and `focalRegions` is NULL, `panels` must contain a `region` column.")
+        }
+        focalRegions <- as.character(panels$region)
+      }
 
       focalRegions <- if(is.null(focalRegions)){
         visible_anchors$region
@@ -1995,7 +2234,11 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
       )
 
       panels <- if(is.null(panels)){
-        private$make_composite_layout(visible_anchors, focalRegions, main_panel, inset_width, inset_height)
+        if(layout == "slot"){
+          private$make_composite_layout(visible_anchors, focalRegions, main_panel, inset_width, inset_height)
+        } else {
+          private$make_ellipse_layout(visible_anchors, focalRegions, main_panel, inset_width, inset_height)
+        }
       } else {
         private$validate_composite_layout(panels, focalRegions, main_panel)
       }
@@ -2025,7 +2268,8 @@ ReMIXTURE <- R6::R6Class("ReMIXTURE",
           border_last = TRUE,
           tight_axes = TRUE,
           draw_grid = FALSE,
-          draw_title = FALSE
+          draw_title = FALSE,
+          inset_style = inset_style
         )
       }
 

@@ -382,8 +382,9 @@ Plot a composite overview map with inset focal-region maps.
   curvature_matrix = NULL,
   mapData = mapData110,
   panels = NULL,
+  layout = c("slot", "ellipse"),
   main_panel = c(left = 0.28, right = 0.72, bottom = 0.3, top = 0.68),
-  inset_width = 0.21,
+  inset_width = 0.18,
   inset_height = NULL,
   panel_aspect = NULL,
   leader_lines = TRUE,
@@ -391,7 +392,8 @@ Plot a composite overview map with inset focal-region maps.
   panel_label_cex = 0.75,
   overview_circle_scale = 0.35,
   inset_circle_scale = 0.55,
-  inset_line_scale = 0.75
+  inset_line_scale = 0.75,
+  inset_style = c("default", "line_emphasis")
 )}\if{html}{\out{</div>}}
 }
 
@@ -418,11 +420,13 @@ Plot a composite overview map with inset focal-region maps.
 
 \item{\code{panels}}{[NULL] Optional data.table/data.frame for manual reuse or editing of inset/card layout. Legacy \code{left/right/bottom/top} input is accepted and interpreted as the map rectangle. The full schema supports \code{region}, \code{side}, \code{card_left}, \code{card_right}, \code{card_bottom}, \code{card_top}, \code{map_left}, \code{map_right}, \code{map_bottom}, \code{map_top}, \code{label_x}, \code{label_y}, \code{label_adj_x}, \code{label_adj_y}, plus \code{left/right/bottom/top} aliases for \verb{map_*}.}
 
+\item{\code{layout}}{[\code{"slot"}] Layout engine for automatic inset placement. \code{"slot"} is the default stable layout. \code{"ellipse"} is an experimental squashed-circle layout that places evenly spaced inset panels around the central map and uses overview-anchor angles to assign regions to those positions.}
+
 \item{\code{main_panel}}{[c(left = 0.28, right = 0.72, bottom = 0.30, top = 0.68)] Normalized device coordinates for the central overview panel.}
 
-\item{\code{inset_width}}{[0.21] Width of each inset panel in normalized device coordinates.}
+\item{\code{inset_width}}{[0.18] Width of each inset panel in normalized device coordinates.}
 
-\item{\code{inset_height}}{[NULL] Height of each inset panel in normalized device coordinates. If NULL, it will be estimated from the current map crop and device aspect ratio.}
+\item{\code{inset_height}}{[NULL] Height of each inset panel in normalized device coordinates. If NULL, it will be estimated from the current map crop and device aspect ratio. Very small explicit values can visually flatten inset maps on wide devices; publication figures can set this manually or edit the returned \code{panels}.}
 
 \item{\code{panel_aspect}}{[NULL] Optional target width/height aspect ratio for inset panels. If NULL, a Tim-style bounded aspect based on the crop is used.}
 
@@ -437,14 +441,21 @@ Plot a composite overview map with inset focal-region maps.
 \item{\code{inset_circle_scale}}{[0.55] Scale factor applied to diversity circles in inset maps. This is a composite-only visual scaling parameter and does not affect analysis results or \code{plot_maps()}.}
 
 \item{\code{inset_line_scale}}{[0.75] Scale factor applied to overlap-curve widths in inset maps. This is a composite-only visual scaling parameter and does not affect analysis results or \code{plot_maps()}.}
+
+\item{\code{inset_style}}{[\code{"default"}] Controls visual emphasis for inset panels. \code{"default"} uses the standard map rendering. \code{"line_emphasis"} reduces the visual dominance of inset circles and emphasises overlap curves; this is useful when inset panels are small.}
 }
 \if{html}{\out{</div>}}
 }
 \subsection{Details}{
 The method draws a slot-based composite figure around a central overview map. Large \code{inset_width} values require sufficient horizontal space around \code{main_panel}. For auto-generated layouts, impossible side geometry fails with a clear error instead of drawing an overlapping figure. For user-supplied \code{panels}, potentially overlapping layouts are warned about rather than automatically modified.
+When \code{focalRegions = NULL}, all visible overview anchors are used. If many regions are visible, the automatic layout may fail clearly rather than drawing overlapping panels; users can pass fewer \code{focalRegions}, reduce \code{inset_width}, adjust \code{main_panel}, or edit the returned \code{panels}.
 
 Before using this method for final interpretation, users are encouraged to inspect H behaviour with the existing ReMIXTURE diagnostic tools, such as \code{plot_h_optimisation()}, \code{plot_results_grid()}, and \code{plot_distance_densities()}, then pass a selected run to \code{plot_maps_composite()}.
 A typical workflow is \code{rm$run(...)}, \code{rm$plot_h_optimisation()}, \code{rm$plot_results_grid()}, \code{rm$plot_distance_densities(HdistFromRun = selected_run)}, and finally \code{rm$plot_maps_composite(run = selected_run)}.
+
+The overview map keeps the full circle-based visual encoding. The \code{"line_emphasis"} inset style is intended for publication-style composite figures where inset maps should highlight overlap curves more than node circles.
+
+When \code{panels} is left NULL, \code{layout = "slot"} uses the default slot-based layout and \code{layout = "ellipse"} uses an experimental ellipse layout. The returned panels can be edited and passed back manually through \code{panels}.
 
 The returned layout uses a full card/map/label schema so it can be edited and passed back through \code{panels} for publication-style manual refinement.
 }
